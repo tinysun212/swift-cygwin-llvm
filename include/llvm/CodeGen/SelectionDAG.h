@@ -268,6 +268,12 @@ private:
                               DenseSet<SDNode *> &visited,
                               int level, bool &printed);
 
+  template <typename SDNodeT, typename... ArgTypes>
+  SDNodeT *newSDNode(ArgTypes &&... Args) {
+    return new (NodeAllocator.template Allocate<SDNodeT>())
+        SDNodeT(std::forward<ArgTypes>(Args)...);
+  }
+
   void operator=(const SelectionDAG&) = delete;
   SelectionDAG(const SelectionDAG&) = delete;
 
@@ -1156,10 +1162,6 @@ public:
   /// either of the specified value types.
   SDValue CreateStackTemporary(EVT VT1, EVT VT2);
 
-  SDValue FoldSymbolOffset(unsigned Opcode, EVT VT,
-                           const GlobalAddressSDNode *GA,
-                           const SDNode *N2);
-
   SDValue FoldConstantArithmetic(unsigned Opcode, SDLoc DL, EVT VT,
                                  SDNode *Cst1, SDNode *Cst2);
 
@@ -1232,10 +1234,12 @@ public:
   /// vector op and fill the end of the resulting vector with UNDEFS.
   SDValue UnrollVectorOp(SDNode *N, unsigned ResNE = 0);
 
-  /// Return true if LD is loading 'Bytes' bytes from a location that is 'Dist'
-  /// units away from the location that the 'Base' load is loading from.
-  bool isConsecutiveLoad(LoadSDNode *LD, LoadSDNode *Base,
-                         unsigned Bytes, int Dist) const;
+  /// Return true if loads are next to each other and can be
+  /// merged. Check that both are nonvolatile and if LD is loading
+  /// 'Bytes' bytes from a location that is 'Dist' units away from the
+  /// location that the 'Base' load is loading from.
+  bool areNonVolatileConsecutiveLoads(LoadSDNode *LD, LoadSDNode *Base,
+                                      unsigned Bytes, int Dist) const;
 
   /// Infer alignment of a load / store address. Return 0 if
   /// it cannot be inferred.
@@ -1270,9 +1274,6 @@ public:
                              unsigned Start = 0, unsigned Count = 0);
 
   unsigned getEVTAlignment(EVT MemoryVT) const;
-
-  /// Test whether the given value is a constant int or similar node.
-  SDNode *isConstantIntBuildVectorOrConstantInt(SDValue N);
 
 private:
   void InsertNode(SDNode *N);

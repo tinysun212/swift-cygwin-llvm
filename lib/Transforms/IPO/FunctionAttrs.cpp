@@ -64,6 +64,7 @@ struct PostOrderFunctionAttrs : public CallGraphSCCPass {
     AU.setPreservesCFG();
     AU.addRequired<AssumptionCacheTracker>();
     AU.addRequired<TargetLibraryInfoWrapperPass>();
+    getAAResultsAnalysisUsage(AU);
     CallGraphSCCPass::getAnalysisUsage(AU);
   }
 
@@ -1034,6 +1035,7 @@ struct ReversePostOrderFunctionAttrs : public ModulePass {
   void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.setPreservesCFG();
     AU.addRequired<CallGraphWrapperPass>();
+    AU.addPreserved<CallGraphWrapperPass>();
   }
 };
 }

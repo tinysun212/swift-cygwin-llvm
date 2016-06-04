@@ -154,6 +154,9 @@ class CallAnalyzer : public InstVisitor<CallAnalyzer, bool> {
   /// analysis.
   void updateThreshold(CallSite CS, Function &Callee);
 
+  /// Return true if size growth is allowed when inlining the callee at CS.
+  bool allowSizeGrowth(CallSite CS);
+
   // Custom analysis routines.
   bool analyzeBlock(BasicBlock *BB, SmallPtrSetImpl<const Value *> &EphValues);
 
@@ -573,17 +576,49 @@ bool CallAnalyzer::isKnownNonNullInCallee(Value *V) {
   return false;
 }
 
+bool CallAnalyzer::allowSizeGrowth(CallSite CS) {
+  // If the normal destination of the invoke or the parent block of the call
+  // site is unreachable-terminated, there is little point in inlining this
+  // unless there is literally zero cost.
+  // FIXME: Note that it is possible that an unreachable-terminated block has a
+  // hot entry. For example, in below scenario inlining hot_call_X() may be
+  // beneficial :
+  // main() {
+  //   hot_call_1();
+  //   ...
+  //   hot_call_N()
+  //   exit(0);
+  // }
+  // For now, we are not handling this corner case here as it is rare in real
+  // code. In future, we should elaborate this based on BPI and BFI in more
+  // general threshold adjusting heuristics in updateThreshold().
+  Instruction *Instr = CS.getInstruction();
+  if (InvokeInst *II = dyn_cast<InvokeInst>(Instr)) {
+    if (isa<UnreachableInst>(II->getNormalDest()->getTerminator()))
+      return false;
+  } else if (isa<UnreachableInst>(Instr->getParent()->getTerminator()))
+    return false;
+
+  return true;
+}
+
 void CallAnalyzer::updateThreshold(CallSite CS, Function &Callee) {
-  // If -inline-threshold is not given, listen to the optsize attribute when it
-  // would decrease the threshold.
+  // If no size growth is allowed for this inlining, set Threshold to 0.
+  if (!allowSizeGrowth(CS)) {
+    Threshold = 0;
+    return;
+  }
+
+  // If -inline-threshold is not given, listen to the optsize and minsize
+  // attributes when they would decrease the threshold.
   Function *Caller = CS.getCaller();
 
-  // FIXME: Use Function::optForSize()
-  bool OptSize = Caller->hasFnAttribute(Attribute::OptimizeForSize);
-
-  if (!(DefaultInlineThreshold.getNumOccurrences() > 0) && OptSize &&
-      OptSizeThreshold < Threshold)
-    Threshold = OptSizeThreshold;
+  if (!(DefaultInlineThreshold.getNumOccurrences() > 0)) {
+    if (Caller->optForMinSize() && OptMinSizeThreshold < Threshold)
+      Threshold = OptMinSizeThreshold;
+    else if (Caller->optForSize() && OptSizeThreshold < Threshold)
+      Threshold = OptSizeThreshold;
+  }
 
   // If profile information is available, use that to adjust threshold of hot
   // and cold functions.
@@ -1215,28 +1250,6 @@ bool CallAnalyzer::analyzeCall(CallSite CS) {
   if (OnlyOneCallAndLocalLinkage)
     Cost += InlineConstants::LastCallToStaticBonus;
 
-  // If the normal destination of the invoke or the parent block of the call
-  // site is unreachable-terminated, there is little point in inlining this
-  // unless there is literally zero cost.
-  // FIXME: Note that it is possible that an unreachable-terminated block has a
-  // hot entry. For example, in below scenario inlining hot_call_X() may be
-  // beneficial :
-  // main() {
-  //   hot_call_1();
-  //   ...
-  //   hot_call_N()
-  //   exit(0);
-  // }
-  // For now, we are not handling this corner case here as it is rare in real
-  // code. In future, we should elaborate this based on BPI and BFI in more
-  // general threshold adjusting heuristics in updateThreshold().
-  Instruction *Instr = CS.getInstruction();
-  if (InvokeInst *II = dyn_cast<InvokeInst>(Instr)) {
-    if (isa<UnreachableInst>(II->getNormalDest()->getTerminator()))
-      Threshold = 0;
-  } else if (isa<UnreachableInst>(Instr->getParent()->getTerminator()))
-    Threshold = 0;
-
   // If this function uses the coldcc calling convention, prefer not to inline
   // it.
   if (F.getCallingConv() == CallingConv::Cold)
@@ -1393,7 +1406,7 @@ bool CallAnalyzer::analyzeCall(CallSite CS) {
   else if (NumVectorInstructions <= NumInstructions / 2)
     Threshold -= (FiftyPercentVectorBonus - TenPercentVectorBonus);
 
-  return Cost <= std::max(0, Threshold);
+  return Cost < std::max(1, Threshold);
 }
 
 #if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)

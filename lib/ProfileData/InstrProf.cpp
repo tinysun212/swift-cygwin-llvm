@@ -17,6 +17,7 @@
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
+#include "llvm/IR/MDBuilder.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/Compression.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -61,6 +62,10 @@ class InstrProfErrorCategoryType : public std::error_category {
       return "Counter overflow";
     case instrprof_error::value_site_count_mismatch:
       return "Function value site count change detected (counter mismatch)";
+    case instrprof_error::compress_failed:
+      return "Failed to compress data (zlib)";
+    case instrprof_error::uncompress_failed:
+      return "Failed to uncompress data (zlib)";
     }
     llvm_unreachable("A value of instrprof_error has no message.");
   }
@@ -79,30 +84,34 @@ std::string getPGOFuncName(StringRef RawFuncName,
                            GlobalValue::LinkageTypes Linkage,
                            StringRef FileName,
                            uint64_t Version LLVM_ATTRIBUTE_UNUSED) {
-
-  // Function names may be prefixed with a binary '1' to indicate
-  // that the backend should not modify the symbols due to any platform
-  // naming convention. Do not include that '1' in the PGO profile name.
-  if (RawFuncName[0] == '\1')
-    RawFuncName = RawFuncName.substr(1);
-
-  std::string FuncName = RawFuncName;
-  if (llvm::GlobalValue::isLocalLinkage(Linkage)) {
-    // For local symbols, prepend the main file name to distinguish them.
-    // Do not include the full path in the file name since there's no guarantee
-    // that it will stay the same, e.g., if the files are checked out from
-    // version control in different locations.
-    if (FileName.empty())
-      FuncName = FuncName.insert(0, "<unknown>:");
-    else
-      FuncName = FuncName.insert(0, FileName.str() + ":");
-  }
-  return FuncName;
+  return GlobalValue::getGlobalIdentifier(RawFuncName, Linkage, FileName);
 }
 
-std::string getPGOFuncName(const Function &F, uint64_t Version) {
-  return getPGOFuncName(F.getName(), F.getLinkage(), F.getParent()->getName(),
-                        Version);
+// Return the PGOFuncName. This function has some special handling when called
+// in LTO optimization. The following only applies when calling in LTO passes
+// (when \c InLTO is true): LTO's internalization privatizes many global linkage
+// symbols. This happens after value profile annotation, but those internal
+// linkage functions should not have a source prefix.
+// To differentiate compiler generated internal symbols from original ones,
+// PGOFuncName meta data are created and attached to the original internal
+// symbols in the value profile annotation step
+// (PGOUseFunc::annotateIndirectCallSites). If a symbol does not have the meta
+// data, its original linkage must be non-internal.
+std::string getPGOFuncName(const Function &F, bool InLTO, uint64_t Version) {
+  if (!InLTO)
+    return getPGOFuncName(F.getName(), F.getLinkage(), F.getParent()->getName(),
+                          Version);
+
+  // In LTO mode (when InLTO is true), first check if there is a meta data.
+  if (MDNode *MD = getPGOFuncNameMetadata(F)) {
+    StringRef S = cast<MDString>(MD->getOperand(0))->getString();
+    return S.str();
+  }
+
+  // If there is no meta data, the function must be a global before the value
+  // profile annotation pass. Its current linkage may be internal if it is
+  // internalized in LTO mode.
+  return getPGOFuncName(F.getName(), GlobalValue::ExternalLinkage, "");
 }
 
 StringRef getFuncNameWithoutPrefix(StringRef PGOFuncName, StringRef FileName) {
@@ -136,7 +145,7 @@ std::string getPGOFuncNameVarName(StringRef FuncName,
 
 GlobalVariable *createPGOFuncNameVar(Module &M,
                                      GlobalValue::LinkageTypes Linkage,
-                                     StringRef FuncName) {
+                                     StringRef PGOFuncName) {
 
   // We generally want to match the function's linkage, but available_externally
   // and extern_weak both have the wrong semantics, and anything that doesn't
@@ -149,10 +158,11 @@ GlobalVariable *createPGOFuncNameVar(Module &M,
            Linkage == GlobalValue::ExternalLinkage)
     Linkage = GlobalValue::PrivateLinkage;
 
-  auto *Value = ConstantDataArray::getString(M.getContext(), FuncName, false);
+  auto *Value =
+      ConstantDataArray::getString(M.getContext(), PGOFuncName, false);
   auto FuncNameVar =
       new GlobalVariable(M, Value->getType(), true, Linkage, Value,
-                         getPGOFuncNameVarName(FuncName, Linkage));
+                         getPGOFuncNameVarName(PGOFuncName, Linkage));
 
   // Hide the symbol so that we correctly get a copy for each executable.
   if (!GlobalValue::isLocalLinkage(FuncNameVar->getLinkage()))
@@ -161,15 +171,36 @@ GlobalVariable *createPGOFuncNameVar(Module &M,
   return FuncNameVar;
 }
 
-GlobalVariable *createPGOFuncNameVar(Function &F, StringRef FuncName) {
-  return createPGOFuncNameVar(*F.getParent(), F.getLinkage(), FuncName);
+GlobalVariable *createPGOFuncNameVar(Function &F, StringRef PGOFuncName) {
+  return createPGOFuncNameVar(*F.getParent(), F.getLinkage(), PGOFuncName);
 }
 
-int collectPGOFuncNameStrings(const std::vector<std::string> &NameStrs,
-                              bool doCompression, std::string &Result) {
+void InstrProfSymtab::create(Module &M, bool InLTO) {
+  for (Function &F : M) {
+    // Function may not have a name: like using asm("") to overwrite the name.
+    // Ignore in this case.
+    if (!F.hasName())
+      continue;
+    const std::string &PGOFuncName = getPGOFuncName(F, InLTO);
+    addFuncName(PGOFuncName);
+    MD5FuncMap.emplace_back(Function::getGUID(PGOFuncName), &F);
+  }
+
+  finalizeSymtab();
+}
+
+std::error_code
+collectPGOFuncNameStrings(const std::vector<std::string> &NameStrs,
+                          bool doCompression, std::string &Result) {
+  assert(NameStrs.size() && "No name data to emit");
+
   uint8_t Header[16], *P = Header;
   std::string UncompressedNameStrings =
-      join(NameStrs.begin(), NameStrs.end(), StringRef(" "));
+      join(NameStrs.begin(), NameStrs.end(), getInstrProfNameSeparator());
+
+  assert(StringRef(UncompressedNameStrings)
+                 .count(getInstrProfNameSeparator()) == (NameStrs.size() - 1) &&
+         "PGO name is invalid (contains separator token)");
 
   unsigned EncLen = encodeULEB128(UncompressedNameStrings.length(), P);
   P += EncLen;
@@ -182,7 +213,7 @@ int collectPGOFuncNameStrings(const std::vector<std::string> &NameStrs,
     unsigned HeaderLen = P - &Header[0];
     Result.append(HeaderStr, HeaderLen);
     Result += InputStr;
-    return 0;
+    return make_error_code(instrprof_error::success);
   };
 
   if (!doCompression)
@@ -194,30 +225,33 @@ int collectPGOFuncNameStrings(const std::vector<std::string> &NameStrs,
                      zlib::BestSizeCompression);
 
   if (Success != zlib::StatusOK)
-    return 1;
+    return make_error_code(instrprof_error::compress_failed);
 
   return WriteStringToResult(
       CompressedNameStrings.size(),
       std::string(CompressedNameStrings.data(), CompressedNameStrings.size()));
 }
 
-StringRef getPGOFuncNameInitializer(GlobalVariable *NameVar) {
+StringRef getPGOFuncNameVarInitializer(GlobalVariable *NameVar) {
   auto *Arr = cast<ConstantDataArray>(NameVar->getInitializer());
   StringRef NameStr =
       Arr->isCString() ? Arr->getAsCString() : Arr->getAsString();
   return NameStr;
 }
 
-int collectPGOFuncNameStrings(const std::vector<GlobalVariable *> &NameVars,
-                              std::string &Result) {
+std::error_code
+collectPGOFuncNameStrings(const std::vector<GlobalVariable *> &NameVars,
+                          std::string &Result, bool doCompression) {
   std::vector<std::string> NameStrs;
   for (auto *NameVar : NameVars) {
-    NameStrs.push_back(getPGOFuncNameInitializer(NameVar));
+    NameStrs.push_back(getPGOFuncNameVarInitializer(NameVar));
   }
-  return collectPGOFuncNameStrings(NameStrs, zlib::isAvailable(), Result);
+  return collectPGOFuncNameStrings(
+      NameStrs, zlib::isAvailable() && doCompression, Result);
 }
 
-int readPGOFuncNameStrings(StringRef NameStrings, InstrProfSymtab &Symtab) {
+std::error_code readPGOFuncNameStrings(StringRef NameStrings,
+                                       InstrProfSymtab &Symtab) {
   const uint8_t *P = reinterpret_cast<const uint8_t *>(NameStrings.data());
   const uint8_t *EndP = reinterpret_cast<const uint8_t *>(NameStrings.data() +
                                                           NameStrings.size());
@@ -235,7 +269,7 @@ int readPGOFuncNameStrings(StringRef NameStrings, InstrProfSymtab &Symtab) {
                                       CompressedSize);
       if (zlib::uncompress(CompressedNameStrings, UncompressedNameStrings,
                            UncompressedSize) != zlib::StatusOK)
-        return 1;
+        return make_error_code(instrprof_error::uncompress_failed);
       P += CompressedSize;
       NameStrings = StringRef(UncompressedNameStrings.data(),
                               UncompressedNameStrings.size());
@@ -246,7 +280,7 @@ int readPGOFuncNameStrings(StringRef NameStrings, InstrProfSymtab &Symtab) {
     }
     // Now parse the name strings.
     SmallVector<StringRef, 0> Names;
-    NameStrings.split(Names, ' ');
+    NameStrings.split(Names, getInstrProfNameSeparator());
     for (StringRef &Name : Names)
       Symtab.addFuncName(Name);
 
@@ -254,7 +288,7 @@ int readPGOFuncNameStrings(StringRef NameStrings, InstrProfSymtab &Symtab) {
       P++;
   }
   Symtab.finalizeSymtab();
-  return 0;
+  return make_error_code(instrprof_error::success);
 }
 
 instrprof_error InstrProfValueSiteRecord::merge(InstrProfValueSiteRecord &Input,
@@ -422,10 +456,9 @@ uint32_t getNumValueDataForSiteInstrProf(const void *R, uint32_t VK,
 }
 
 void getValueForSiteInstrProf(const void *R, InstrProfValueData *Dst,
-                              uint32_t K, uint32_t S,
-                              uint64_t (*Mapper)(uint32_t, uint64_t)) {
-  return reinterpret_cast<const InstrProfRecord *>(R)->getValueForSite(
-      Dst, K, S, Mapper);
+                              uint32_t K, uint32_t S) {
+  reinterpret_cast<const InstrProfRecord *>(R)->getValueForSite(Dst, K, S);
+  return;
 }
 
 ValueProfData *allocValueProfDataInstrProf(size_t TotalSizeInBytes) {
@@ -599,6 +632,101 @@ void ValueProfData::swapBytesFromHost(support::endianness Endianness) {
   sys::swapByteOrder<uint32_t>(NumValueKinds);
 }
 
+void annotateValueSite(Module &M, Instruction &Inst,
+                       const InstrProfRecord &InstrProfR,
+                       InstrProfValueKind ValueKind, uint32_t SiteIdx,
+                       uint32_t MaxMDCount) {
+  uint32_t NV = InstrProfR.getNumValueDataForSite(ValueKind, SiteIdx);
+
+  uint64_t Sum = 0;
+  std::unique_ptr<InstrProfValueData[]> VD =
+      InstrProfR.getValueForSite(ValueKind, SiteIdx, &Sum);
+
+  ArrayRef<InstrProfValueData> VDs(VD.get(), NV);
+  annotateValueSite(M, Inst, VDs, Sum, ValueKind, MaxMDCount);
+}
+
+void annotateValueSite(Module &M, Instruction &Inst,
+                       ArrayRef<InstrProfValueData> VDs,
+                       uint64_t Sum, InstrProfValueKind ValueKind,
+                       uint32_t MaxMDCount) {
+  LLVMContext &Ctx = M.getContext();
+  MDBuilder MDHelper(Ctx);
+  SmallVector<Metadata *, 3> Vals;
+  // Tag
+  Vals.push_back(MDHelper.createString("VP"));
+  // Value Kind
+  Vals.push_back(MDHelper.createConstant(
+      ConstantInt::get(Type::getInt32Ty(Ctx), ValueKind)));
+  // Total Count
+  Vals.push_back(
+      MDHelper.createConstant(ConstantInt::get(Type::getInt64Ty(Ctx), Sum)));
+
+  // Value Profile Data
+  uint32_t MDCount = MaxMDCount;
+  for (auto &VD : VDs) {
+    Vals.push_back(MDHelper.createConstant(
+        ConstantInt::get(Type::getInt64Ty(Ctx), VD.Value)));
+    Vals.push_back(MDHelper.createConstant(
+        ConstantInt::get(Type::getInt64Ty(Ctx), VD.Count)));
+    if (--MDCount == 0)
+      break;
+  }
+  Inst.setMetadata(LLVMContext::MD_prof, MDNode::get(Ctx, Vals));
+}
+
+bool getValueProfDataFromInst(const Instruction &Inst,
+                              InstrProfValueKind ValueKind,
+                              uint32_t MaxNumValueData,
+                              InstrProfValueData ValueData[],
+                              uint32_t &ActualNumValueData, uint64_t &TotalC) {
+  MDNode *MD = Inst.getMetadata(LLVMContext::MD_prof);
+  if (!MD)
+    return false;
+
+  unsigned NOps = MD->getNumOperands();
+
+  if (NOps < 5)
+    return false;
+
+  // Operand 0 is a string tag "VP":
+  MDString *Tag = cast<MDString>(MD->getOperand(0));
+  if (!Tag)
+    return false;
+
+  if (!Tag->getString().equals("VP"))
+    return false;
+
+  // Now check kind:
+  ConstantInt *KindInt = mdconst::dyn_extract<ConstantInt>(MD->getOperand(1));
+  if (!KindInt)
+    return false;
+  if (KindInt->getZExtValue() != ValueKind)
+    return false;
+
+  // Get total count
+  ConstantInt *TotalCInt = mdconst::dyn_extract<ConstantInt>(MD->getOperand(2));
+  if (!TotalCInt)
+    return false;
+  TotalC = TotalCInt->getZExtValue();
+
+  ActualNumValueData = 0;
+
+  for (unsigned I = 3; I < NOps; I += 2) {
+    if (ActualNumValueData >= MaxNumValueData)
+      break;
+    ConstantInt *Value = mdconst::dyn_extract<ConstantInt>(MD->getOperand(I));
+    ConstantInt *Count =
+        mdconst::dyn_extract<ConstantInt>(MD->getOperand(I + 1));
+    if (!Value || !Count)
+      return false;
+    ValueData[ActualNumValueData].Value = Value->getZExtValue();
+    ValueData[ActualNumValueData].Count = Count->getZExtValue();
+    ActualNumValueData++;
+  }
+  return true;
+}
+
 // The argument to this method is a vector of cutoff percentages and the return
 // value is a vector of (Cutoff, MinBlockCount, NumBlocks) triplets.
 void ProfileSummary::computeDetailedSummary() {
@@ -609,7 +737,7 @@ void ProfileSummary::computeDetailedSummary() {
   std::sort(DetailedSummaryCutoffs.begin(), DetailedSummaryCutoffs.end());
 
   uint32_t BlocksSeen = 0;
-  uint64_t CurrSum = 0, Count;
+  uint64_t CurrSum = 0, Count = 0;
 
   for (uint32_t Cutoff : DetailedSummaryCutoffs) {
     assert(Cutoff <= 999999);
@@ -634,4 +762,31 @@ void ProfileSummary::computeDetailedSummary() {
   return;
 }
 
+ProfileSummary::ProfileSummary(const IndexedInstrProf::Summary &S)
+    : TotalCount(S.get(IndexedInstrProf::Summary::TotalBlockCount)),
+      MaxBlockCount(S.get(IndexedInstrProf::Summary::MaxBlockCount)),
+      MaxInternalBlockCount(
+          S.get(IndexedInstrProf::Summary::MaxInternalBlockCount)),
+      MaxFunctionCount(S.get(IndexedInstrProf::Summary::MaxFunctionCount)),
+      NumBlocks(S.get(IndexedInstrProf::Summary::TotalNumBlocks)),
+      NumFunctions(S.get(IndexedInstrProf::Summary::TotalNumFunctions)) {
+  for (unsigned I = 0; I < S.NumCutoffEntries; I++) {
+    const IndexedInstrProf::Summary::Entry &Ent = S.getEntry(I);
+    DetailedSummary.emplace_back((uint32_t)Ent.Cutoff, Ent.MinBlockCount,
+                                 Ent.NumBlocks);
+  }
 }
+
+void createPGOFuncNameMetadata(Function &F, const std::string &PGOFuncName) {
+  // Only for internal linkage functions.
+  if (PGOFuncName == F.getName())
+      return;
+  // Don't create duplicated meta-data.
+  if (getPGOFuncNameMetadata(F))
+    return;
+  LLVMContext &C = F.getContext();
+  MDNode *N = MDNode::get(C, MDString::get(C, PGOFuncName.c_str()));
+  F.setMetadata(getPGOFuncNameMetadataName(), N);
+}
+
+} // end namespace llvm

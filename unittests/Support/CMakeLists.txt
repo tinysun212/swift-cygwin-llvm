@@ -36,7 +36,7 @@ add_llvm_unittest(SupportTests
   ScaledNumberTest.cpp
   SourceMgrTest.cpp
   SpecialCaseListTest.cpp
-  StreamingMemoryObject.cpp
+  StreamingMemoryObjectTest.cpp
   StringPool.cpp
   SwapByteOrderTest.cpp
   TargetRegistry.cpp
@@ -51,6 +51,7 @@ add_llvm_unittest(SupportTests
   formatted_raw_ostream_test.cpp
   raw_ostream_test.cpp
   raw_pwrite_stream_test.cpp
+  raw_sha1_ostream_test.cpp
   )
 
 # ManagedStatic.cpp uses <pthread>.

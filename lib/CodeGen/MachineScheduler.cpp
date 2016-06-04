@@ -65,6 +65,11 @@ static cl::opt<unsigned> SchedOnlyBlock("misched-only-block", cl::Hidden,
 static bool ViewMISchedDAGs = false;
 #endif // NDEBUG
 
+/// Avoid quadratic complexity in unusually large basic blocks by limiting the
+/// size of the ready lists.
+static cl::opt<unsigned> ReadyListLimit("misched-limit", cl::Hidden,
+  cl::desc("Limit ready list to N instructions"), cl::init(256));
+
 static cl::opt<bool> EnableRegPressure("misched-regpressure", cl::Hidden,
   cl::desc("Enable register pressure scheduling."), cl::init(true));
 
@@ -314,6 +319,9 @@ ScheduleDAGInstrs *PostMachineScheduler::createPostMachineScheduler() {
 /// design would be to split blocks at scheduling boundaries, but LLVM has a
 /// general bias against block splitting purely for implementation simplicity.
 bool MachineScheduler::runOnMachineFunction(MachineFunction &mf) {
+  if (skipOptnoneFunction(*mf.getFunction()))
+    return false;
+
   if (EnableMachineSched.getNumOccurrences()) {
     if (!EnableMachineSched)
       return false;
@@ -1923,7 +1931,8 @@ void SchedBoundary::releaseNode(SUnit *SU, unsigned ReadyCycle) {
   // Check for interlocks first. For the purpose of other heuristics, an
   // instruction that cannot issue appears as if it's not in the ReadyQueue.
   bool IsBuffered = SchedModel->getMicroOpBufferSize() != 0;
-  if ((!IsBuffered && ReadyCycle > CurrCycle) || checkHazard(SU))
+  if ((!IsBuffered && ReadyCycle > CurrCycle) || checkHazard(SU) ||
+      Available.size() >= ReadyListLimit)
     Pending.push(SU);
   else
     Available.push(SU);
@@ -2179,6 +2188,9 @@ void SchedBoundary::releasePending() {
 
     if (checkHazard(SU))
       continue;
+
+    if (Available.size() >= ReadyListLimit)
+      break;
 
     Available.push(SU);
     Pending.remove(Pending.begin()+i);

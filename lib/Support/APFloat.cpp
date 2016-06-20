@@ -3948,7 +3948,8 @@ void APFloat::makeQuiet() {
   APInt::tcSetBit(significandParts(), semantics->precision - 2);
 }
 
-int llvm::ilogb(const APFloat &Arg) {
+namespace llvm {
+int ilogb(const APFloat &Arg) {
   if (Arg.isNaN())
     return APFloat::IEK_NaN;
   if (Arg.isZero())
@@ -3964,6 +3965,7 @@ int llvm::ilogb(const APFloat &Arg) {
   Normalized.exponent += SignificandBits;
   Normalized.normalize(APFloat::rmNearestTiesToEven, lfExactlyZero);
   return Normalized.exponent - SignificandBits;
+}
 }
 
 APFloat llvm::scalbn(APFloat X, int Exp, APFloat::roundingMode RoundingMode) {

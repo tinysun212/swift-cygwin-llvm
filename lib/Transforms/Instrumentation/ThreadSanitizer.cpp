@@ -258,6 +258,10 @@ bool shouldInstrumentReadWriteFromAddress(Value *Addr) {
             /*AddSegment=*/false)))
         return false;
     }
+
+    // Check if the global is in a GCOV counter array.
+    if (GV->getName().startswith("__llvm_gcov_ctr"))
+      return false;
   }
   return true;
 }

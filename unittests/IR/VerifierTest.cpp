@@ -1,4 +1,4 @@
-//===- llvm/unittest/IR/VerifierTest.cpp - Verifier unit tests ------------===//
+//===- llvm/unittest/IR/VerifierTest.cpp - Verifier unit tests --*- C++ -*-===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -24,7 +24,7 @@ namespace llvm {
 namespace {
 
 TEST(VerifierTest, Branch_i1) {
-  LLVMContext &C = getGlobalContext();
+  LLVMContext C;
   Module M("M", C);
   FunctionType *FTy = FunctionType::get(Type::getVoidTy(C), /*isVarArg=*/false);
   Function *F = cast<Function>(M.getOrInsertFunction("foo", FTy));
@@ -47,7 +47,7 @@ TEST(VerifierTest, Branch_i1) {
 }
 
 TEST(VerifierTest, InvalidRetAttribute) {
-  LLVMContext &C = getGlobalContext();
+  LLVMContext C;
   Module M("M", C);
   FunctionType *FTy = FunctionType::get(Type::getInt32Ty(C), /*isVarArg=*/false);
   Function *F = cast<Function>(M.getOrInsertFunction("foo", FTy));
@@ -63,7 +63,7 @@ TEST(VerifierTest, InvalidRetAttribute) {
 }
 
 TEST(VerifierTest, CrossModuleRef) {
-  LLVMContext &C = getGlobalContext();
+  LLVMContext C;
   Module M1("M1", C);
   Module M2("M2", C);
   Module M3("M3", C);
@@ -122,12 +122,13 @@ TEST(VerifierTest, CrossModuleRef) {
 }
 
 TEST(VerifierTest, CrossModuleMetadataRef) {
-  LLVMContext &C = getGlobalContext();
+  LLVMContext C;
   Module M1("M1", C);
   Module M2("M2", C);
   GlobalVariable *newGV =
       new GlobalVariable(M1, Type::getInt8Ty(C), false,
-                         GlobalVariable::ExternalLinkage, NULL, "Some Global");
+                         GlobalVariable::ExternalLinkage, nullptr,
+                         "Some Global");
 
   DIBuilder dbuilder(M2);
   auto CU = dbuilder.createCompileUnit(dwarf::DW_LANG_Julia, "test.jl", ".",
@@ -145,6 +146,35 @@ TEST(VerifierTest, CrossModuleMetadataRef) {
                   .startswith("Referencing global in another module!"));
 }
 
+TEST(VerifierTest, InvalidVariableLinkage) {
+  LLVMContext C;
+  Module M("M", C);
+  new GlobalVariable(M, Type::getInt8Ty(C), false,
+                     GlobalValue::LinkOnceODRLinkage, nullptr, "Some Global");
+  std::string Error;
+  raw_string_ostream ErrorOS(Error);
+  EXPECT_TRUE(verifyModule(M, &ErrorOS));
+  EXPECT_TRUE(
+      StringRef(ErrorOS.str()).startswith("Global is external, but doesn't "
+                                          "have external or weak linkage!"));
+}
+
+TEST(VerifierTest, InvalidFunctionLinkage) {
+  LLVMContext C;
+  Module M("M", C);
+
+  FunctionType *FTy = FunctionType::get(Type::getVoidTy(C), /*isVarArg=*/false);
+  Function::Create(FTy, GlobalValue::LinkOnceODRLinkage, "foo", &M);
+  std::string Error;
+  raw_string_ostream ErrorOS(Error);
+  EXPECT_TRUE(verifyModule(M, &ErrorOS));
+  EXPECT_TRUE(
+      StringRef(ErrorOS.str()).startswith("Global is external, but doesn't "
+                                          "have external or weak linkage!"));
+}
+
+#ifndef _MSC_VER
+// FIXME: This test causes an ICE in MSVC 2013.
 TEST(VerifierTest, StripInvalidDebugInfo) {
   LLVMContext C;
   Module M("M", C);
@@ -163,11 +193,11 @@ TEST(VerifierTest, StripInvalidDebugInfo) {
   ModulePassManager MPM(true);
   MPM.addPass(VerifierPass(false));
   ModuleAnalysisManager MAM(true);
-  MAM.registerPass(VerifierAnalysis());
-  MPM.run(M, &MAM);
+  MAM.registerPass([&] { return VerifierAnalysis(); });
+  MPM.run(M, MAM);
   EXPECT_FALSE(verifyModule(M));
 }
-
+#endif
 
 TEST(VerifierTest, StripInvalidDebugInfoLegacy) {
   LLVMContext C;

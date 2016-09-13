@@ -12,9 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "llvm/LTO/LTOCodeGenerator.h"
+#include "llvm/LTO/legacy/LTOCodeGenerator.h"
 
-#include "UpdateCompilerUsed.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Analysis/Passes.h"
@@ -36,7 +35,8 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/InitializePasses.h"
-#include "llvm/LTO/LTOModule.h"
+#include "llvm/LTO/legacy/LTOModule.h"
+#include "llvm/LTO/legacy/UpdateCompilerUsed.h"
 #include "llvm/Linker/Linker.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCContext.h"
@@ -107,28 +107,26 @@ LTOCodeGenerator::~LTOCodeGenerator() {}
 void LTOCodeGenerator::initializeLTOPasses() {
   PassRegistry &R = *PassRegistry::getPassRegistry();
 
-  initializeInternalizePassPass(R);
-  initializeIPSCCPPass(R);
-  initializeGlobalOptPass(R);
-  initializeConstantMergePass(R);
+  initializeInternalizeLegacyPassPass(R);
+  initializeIPSCCPLegacyPassPass(R);
+  initializeGlobalOptLegacyPassPass(R);
+  initializeConstantMergeLegacyPassPass(R);
   initializeDAHPass(R);
   initializeInstructionCombiningPassPass(R);
   initializeSimpleInlinerPass(R);
   initializePruneEHPass(R);
-  initializeGlobalDCEPass(R);
+  initializeGlobalDCELegacyPassPass(R);
   initializeArgPromotionPass(R);
   initializeJumpThreadingPass(R);
   initializeSROALegacyPassPass(R);
-  initializeSROA_DTPass(R);
-  initializeSROA_SSAUpPass(R);
-  initializePostOrderFunctionAttrsPass(R);
-  initializeReversePostOrderFunctionAttrsPass(R);
+  initializePostOrderFunctionAttrsLegacyPassPass(R);
+  initializeReversePostOrderFunctionAttrsLegacyPassPass(R);
   initializeGlobalsAAWrapperPassPass(R);
-  initializeLICMPass(R);
-  initializeMergedLoadStoreMotionPass(R);
-  initializeGVNPass(R);
-  initializeMemCpyOptPass(R);
-  initializeDCEPass(R);
+  initializeLegacyLICMPassPass(R);
+  initializeMergedLoadStoreMotionLegacyPassPass(R);
+  initializeGVNLegacyPassPass(R);
+  initializeMemCpyOptLegacyPassPass(R);
+  initializeDCELegacyPassPass(R);
   initializeCFGSimplifyPassPass(R);
 }
 
@@ -165,7 +163,7 @@ void LTOCodeGenerator::setModule(std::unique_ptr<LTOModule> Mod) {
   HasVerifiedInput = false;
 }
 
-void LTOCodeGenerator::setTargetOptions(TargetOptions Options) {
+void LTOCodeGenerator::setTargetOptions(const TargetOptions &Options) {
   this->Options = Options;
 }
 
@@ -319,7 +317,7 @@ bool LTOCodeGenerator::determineTarget() {
   if (TargetMach)
     return true;
 
-  std::string TripleStr = MergedModule->getTargetTriple();
+  TripleStr = MergedModule->getTargetTriple();
   if (TripleStr.empty()) {
     TripleStr = sys::getDefaultTargetTriple();
     MergedModule->setTargetTriple(TripleStr);
@@ -328,8 +326,8 @@ bool LTOCodeGenerator::determineTarget() {
 
   // create target machine from info for merged modules
   std::string ErrMsg;
-  const Target *march = TargetRegistry::lookupTarget(TripleStr, ErrMsg);
-  if (!march) {
+  MArch = TargetRegistry::lookupTarget(TripleStr, ErrMsg);
+  if (!MArch) {
     emitError(ErrMsg);
     return false;
   }
@@ -349,10 +347,14 @@ bool LTOCodeGenerator::determineTarget() {
       MCpu = "cyclone";
   }
 
-  TargetMach.reset(march->createTargetMachine(TripleStr, MCpu, FeatureStr,
-                                              Options, RelocModel,
-                                              CodeModel::Default, CGOptLevel));
+  TargetMach = createTargetMachine();
   return true;
+}
+
+std::unique_ptr<TargetMachine> LTOCodeGenerator::createTargetMachine() {
+  return std::unique_ptr<TargetMachine>(
+      MArch->createTargetMachine(TripleStr, MCpu, FeatureStr, Options,
+                                 RelocModel, CodeModel::Default, CGOptLevel));
 }
 
 // If a linkonce global is present in the MustPreserveSymbols, we need to make
@@ -453,7 +455,7 @@ void LTOCodeGenerator::applyScopeRestrictions() {
 
   // Update the llvm.compiler_used globals to force preserving libcalls and
   // symbols referenced from asm
-  UpdateCompilerUsed(*MergedModule, *TargetMach, AsmUndefinedRefs);
+  updateCompilerUsed(*MergedModule, *TargetMach, AsmUndefinedRefs);
 
   internalizeModule(*MergedModule, mustPreserveGV);
 
@@ -575,10 +577,9 @@ bool LTOCodeGenerator::compileOptimized(ArrayRef<raw_pwrite_stream *> Out) {
   // parallelism level 1. This is achieved by having splitCodeGen return the
   // original module at parallelism level 1 which we then assign back to
   // MergedModule.
-  MergedModule =
-      splitCodeGen(std::move(MergedModule), Out, MCpu, FeatureStr, Options,
-                   RelocModel, CodeModel::Default, CGOptLevel, FileType,
-                   ShouldRestoreGlobalsLinkage);
+  MergedModule = splitCodeGen(std::move(MergedModule), Out, {},
+                              [&]() { return createTargetMachine(); }, FileType,
+                              ShouldRestoreGlobalsLinkage);
 
   // If statistics were requested, print them out after codegen.
   if (llvm::AreStatisticsEnabled())

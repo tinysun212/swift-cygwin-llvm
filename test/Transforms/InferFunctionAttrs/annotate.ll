@@ -2,12 +2,17 @@
 ; RUN: opt < %s -mtriple=x86_64-- -passes=inferattrs -S | FileCheck %s
 ; RUN: opt < %s -mtriple=x86_64-apple-macosx10.8.0 -inferattrs -S | FileCheck -check-prefix=CHECK -check-prefix=CHECK-DARWIN %s
 ; RUN: opt < %s -mtriple=x86_64-unknown-linux -inferattrs -S | FileCheck -check-prefix=CHECK -check-prefix=CHECK-LINUX %s
+; RUN: opt < %s -mtriple=nvptx -inferattrs -S | FileCheck -check-prefix=CHECK-NVPTX %s
 
 ; operator new routines
 declare i8* @_Znwj(i64)
 ; CHECK: declare noalias nonnull i8* @_Znwj(i64)
 declare i8* @_Znwm(i64)
 ; CHECK: declare noalias nonnull i8* @_Znwm(i64)
+
+declare i32 @__nvvm_reflect(i8*)
+; CHECK-NVPTX: declare i32 @__nvvm_reflect(i8*) [[G0:#[0-9]+]]
+; CHECK-NVPTX: attributes [[G0]] = { nounwind readnone }
 
 
 ; Check all the libc functions (thereby also exercising the prototype check).
@@ -493,6 +498,9 @@ declare i32 @memcmp(i8*, i8*, i64)
 
 ; CHECK: declare i8* @memcpy(i8*, i8* nocapture readonly, i64) [[G0]]
 declare i8* @memcpy(i8*, i8*, i64)
+
+; CHECK: declare i8* @mempcpy(i8*, i8* nocapture readonly, i64) [[G0]]
+declare i8* @mempcpy(i8*, i8*, i64)
 
 ; CHECK: declare i8* @memmove(i8*, i8* nocapture readonly, i64) [[G0]]
 declare i8* @memmove(i8*, i8*, i64)

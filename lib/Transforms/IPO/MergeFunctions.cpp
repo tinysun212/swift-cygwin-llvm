@@ -89,13 +89,10 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "llvm/Transforms/IPO.h"
-#include "llvm/ADT/DenseSet.h"
-#include "llvm/ADT/FoldingSet.h"
+#include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/Statistic.h"
-#include "llvm/ADT/Hashing.h"
 #include "llvm/IR/CallSite.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
@@ -112,6 +109,7 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Transforms/IPO.h"
 #include <vector>
 
 using namespace llvm;
@@ -320,8 +318,8 @@ private:
   int cmpValues(const Value *L, const Value *R) const;
 
   /// Compare two Instructions for equivalence, similar to
-  /// Instruction::isSameOperationAs but with modifications to the type
-  /// comparison.
+  /// Instruction::isSameOperationAs.
+  ///
   /// Stages are listed in "most significant stage first" order:
   /// On each stage below, we do comparison between some left and right
   /// operation parts. If parts are non-equal, we assign parts comparison
@@ -339,8 +337,9 @@ private:
   /// For example, for Load it would be:
   /// 6.1.Load: volatile (as boolean flag)
   /// 6.2.Load: alignment (as integer numbers)
-  /// 6.3.Load: synch-scope (as integer numbers)
-  /// 6.4.Load: range metadata (as integer numbers)
+  /// 6.3.Load: ordering (as underlying enum class value)
+  /// 6.4.Load: synch-scope (as integer numbers)
+  /// 6.5.Load: range metadata (as integer ranges)
   /// On this stage its better to see the code, since its not more than 10-15
   /// strings for particular instruction, and could change sometimes.
   int cmpOperations(const Instruction *L, const Instruction *R) const;
@@ -402,6 +401,7 @@ private:
   int cmpTypes(Type *TyL, Type *TyR) const;
 
   int cmpNumbers(uint64_t L, uint64_t R) const;
+  int cmpOrderings(AtomicOrdering L, AtomicOrdering R) const;
   int cmpAPInts(const APInt &L, const APInt &R) const;
   int cmpAPFloats(const APFloat &L, const APFloat &R) const;
   int cmpInlineAsm(const InlineAsm *L, const InlineAsm *R) const;
@@ -475,6 +475,12 @@ public:
 int FunctionComparator::cmpNumbers(uint64_t L, uint64_t R) const {
   if (L < R) return -1;
   if (L > R) return 1;
+  return 0;
+}
+
+int FunctionComparator::cmpOrderings(AtomicOrdering L, AtomicOrdering R) const {
+  if ((int)L < (int)R) return -1;
+  if ((int)L > (int)R) return 1;
   return 0;
 }
 
@@ -900,9 +906,9 @@ int FunctionComparator::cmpTypes(Type *TyL, Type *TyR) const {
 int FunctionComparator::cmpOperations(const Instruction *L,
                                       const Instruction *R) const {
   // Differences from Instruction::isSameOperationAs:
-  //  * replace type comparison with calls to isEquivalentType.
-  //  * we test for I->hasSameSubclassOptionalData (nuw/nsw/tail) at the top
-  //  * because of the above, we don't test for the tail bit on calls later on
+  //  * replace type comparison with calls to cmpTypes.
+  //  * we test for I->getRawSubclassOptionalData (nuw/nsw/tail) at the top.
+  //  * because of the above, we don't test for the tail bit on calls later on.
   if (int Res = cmpNumbers(L->getOpcode(), R->getOpcode()))
     return Res;
 
@@ -916,15 +922,6 @@ int FunctionComparator::cmpOperations(const Instruction *L,
                            R->getRawSubclassOptionalData()))
     return Res;
 
-  if (const AllocaInst *AI = dyn_cast<AllocaInst>(L)) {
-    if (int Res = cmpTypes(AI->getAllocatedType(),
-                           cast<AllocaInst>(R)->getAllocatedType()))
-      return Res;
-    if (int Res =
-            cmpNumbers(AI->getAlignment(), cast<AllocaInst>(R)->getAlignment()))
-      return Res;
-  }
-
   // We have two instructions of identical opcode and #operands.  Check to see
   // if all operands are the same type
   for (unsigned i = 0, e = L->getNumOperands(); i != e; ++i) {
@@ -934,6 +931,12 @@ int FunctionComparator::cmpOperations(const Instruction *L,
   }
 
   // Check special state that is a part of some instructions.
+  if (const AllocaInst *AI = dyn_cast<AllocaInst>(L)) {
+    if (int Res = cmpTypes(AI->getAllocatedType(),
+                           cast<AllocaInst>(R)->getAllocatedType()))
+      return Res;
+    return cmpNumbers(AI->getAlignment(), cast<AllocaInst>(R)->getAlignment());
+  }
   if (const LoadInst *LI = dyn_cast<LoadInst>(L)) {
     if (int Res = cmpNumbers(LI->isVolatile(), cast<LoadInst>(R)->isVolatile()))
       return Res;
@@ -941,7 +944,7 @@ int FunctionComparator::cmpOperations(const Instruction *L,
             cmpNumbers(LI->getAlignment(), cast<LoadInst>(R)->getAlignment()))
       return Res;
     if (int Res =
-            cmpNumbers(LI->getOrdering(), cast<LoadInst>(R)->getOrdering()))
+            cmpOrderings(LI->getOrdering(), cast<LoadInst>(R)->getOrdering()))
       return Res;
     if (int Res =
             cmpNumbers(LI->getSynchScope(), cast<LoadInst>(R)->getSynchScope()))
@@ -957,7 +960,7 @@ int FunctionComparator::cmpOperations(const Instruction *L,
             cmpNumbers(SI->getAlignment(), cast<StoreInst>(R)->getAlignment()))
       return Res;
     if (int Res =
-            cmpNumbers(SI->getOrdering(), cast<StoreInst>(R)->getOrdering()))
+            cmpOrderings(SI->getOrdering(), cast<StoreInst>(R)->getOrdering()))
       return Res;
     return cmpNumbers(SI->getSynchScope(), cast<StoreInst>(R)->getSynchScope());
   }
@@ -998,6 +1001,7 @@ int FunctionComparator::cmpOperations(const Instruction *L,
       if (int Res = cmpNumbers(LIndices[i], RIndices[i]))
         return Res;
     }
+    return 0;
   }
   if (const ExtractValueInst *EVI = dyn_cast<ExtractValueInst>(L)) {
     ArrayRef<unsigned> LIndices = EVI->getIndices();
@@ -1011,11 +1015,10 @@ int FunctionComparator::cmpOperations(const Instruction *L,
   }
   if (const FenceInst *FI = dyn_cast<FenceInst>(L)) {
     if (int Res =
-            cmpNumbers(FI->getOrdering(), cast<FenceInst>(R)->getOrdering()))
+            cmpOrderings(FI->getOrdering(), cast<FenceInst>(R)->getOrdering()))
       return Res;
     return cmpNumbers(FI->getSynchScope(), cast<FenceInst>(R)->getSynchScope());
   }
-
   if (const AtomicCmpXchgInst *CXI = dyn_cast<AtomicCmpXchgInst>(L)) {
     if (int Res = cmpNumbers(CXI->isVolatile(),
                              cast<AtomicCmpXchgInst>(R)->isVolatile()))
@@ -1023,11 +1026,13 @@ int FunctionComparator::cmpOperations(const Instruction *L,
     if (int Res = cmpNumbers(CXI->isWeak(),
                              cast<AtomicCmpXchgInst>(R)->isWeak()))
       return Res;
-    if (int Res = cmpNumbers(CXI->getSuccessOrdering(),
-                             cast<AtomicCmpXchgInst>(R)->getSuccessOrdering()))
+    if (int Res =
+            cmpOrderings(CXI->getSuccessOrdering(),
+                         cast<AtomicCmpXchgInst>(R)->getSuccessOrdering()))
       return Res;
-    if (int Res = cmpNumbers(CXI->getFailureOrdering(),
-                             cast<AtomicCmpXchgInst>(R)->getFailureOrdering()))
+    if (int Res =
+            cmpOrderings(CXI->getFailureOrdering(),
+                         cast<AtomicCmpXchgInst>(R)->getFailureOrdering()))
       return Res;
     return cmpNumbers(CXI->getSynchScope(),
                       cast<AtomicCmpXchgInst>(R)->getSynchScope());
@@ -1039,7 +1044,7 @@ int FunctionComparator::cmpOperations(const Instruction *L,
     if (int Res = cmpNumbers(RMWI->isVolatile(),
                              cast<AtomicRMWInst>(R)->isVolatile()))
       return Res;
-    if (int Res = cmpNumbers(RMWI->getOrdering(),
+    if (int Res = cmpOrderings(RMWI->getOrdering(),
                              cast<AtomicRMWInst>(R)->getOrdering()))
       return Res;
     return cmpNumbers(RMWI->getSynchScope(),
@@ -1199,7 +1204,8 @@ int FunctionComparator::cmpBasicBlocks(const BasicBlock *BBL,
       }
     }
 
-    ++InstL, ++InstR;
+    ++InstL;
+    ++InstR;
   } while (InstL != InstLE && InstR != InstRE);
 
   if (InstL != InstLE && InstR == InstRE)
@@ -1530,6 +1536,9 @@ bool MergeFunctions::doSanityCheck(std::vector<WeakVH> &Worklist) {
 }
 
 bool MergeFunctions::runOnModule(Module &M) {
+  if (skipModule(M))
+    return false;
+
   bool Changed = false;
 
   // All functions in the module, ordered by hash. Functions with a unique
@@ -1568,28 +1577,12 @@ bool MergeFunctions::runOnModule(Module &M) {
     DEBUG(dbgs() << "size of module: " << M.size() << '\n');
     DEBUG(dbgs() << "size of worklist: " << Worklist.size() << '\n');
 
-    // Insert only strong functions and merge them. Strong function merging
-    // always deletes one of them.
-    for (std::vector<WeakVH>::iterator I = Worklist.begin(),
-           E = Worklist.end(); I != E; ++I) {
-      if (!*I) continue;
-      Function *F = cast<Function>(*I);
-      if (!F->isDeclaration() && !F->hasAvailableExternallyLinkage() &&
-          !F->mayBeOverridden()) {
-        Changed |= insert(F);
-      }
-    }
-
-    // Insert only weak functions and merge them. By doing these second we
-    // create thunks to the strong function when possible. When two weak
-    // functions are identical, we create a new strong function with two weak
-    // weak thunks to it which are identical but not mergable.
-    for (std::vector<WeakVH>::iterator I = Worklist.begin(),
-           E = Worklist.end(); I != E; ++I) {
-      if (!*I) continue;
-      Function *F = cast<Function>(*I);
-      if (!F->isDeclaration() && !F->hasAvailableExternallyLinkage() &&
-          F->mayBeOverridden()) {
+    // Insert functions and merge them.
+    for (WeakVH &I : Worklist) {
+      if (!I)
+        continue;
+      Function *F = cast<Function>(I);
+      if (!F->isDeclaration() && !F->hasAvailableExternallyLinkage()) {
         Changed |= insert(F);
       }
     }
@@ -1644,7 +1637,7 @@ void MergeFunctions::replaceDirectCallers(Function *Old, Function *New) {
 
 // Replace G with an alias to F if possible, or else a thunk to F. Deletes G.
 void MergeFunctions::writeThunkOrAlias(Function *F, Function *G) {
-  if (HasGlobalAliases && G->hasUnnamedAddr()) {
+  if (HasGlobalAliases && G->hasGlobalUnnamedAddr()) {
     if (G->hasExternalLinkage() || G->hasLocalLinkage() ||
         G->hasWeakLinkage()) {
       writeAlias(F, G);
@@ -1686,7 +1679,7 @@ static Value *createCast(IRBuilder<> &Builder, Value *V, Type *DestTy) {
 // Replace G with a simple tail call to bitcast(F). Also replace direct uses
 // of G with bitcast(F). Deletes G.
 void MergeFunctions::writeThunk(Function *F, Function *G) {
-  if (!G->mayBeOverridden()) {
+  if (!G->isInterposable()) {
     // Redirect direct callers of G to F.
     replaceDirectCallers(G, F);
   }
@@ -1747,8 +1740,8 @@ void MergeFunctions::writeAlias(Function *F, Function *G) {
 
 // Merge two equivalent functions. Upon completion, Function G is deleted.
 void MergeFunctions::mergeTwoFunctions(Function *F, Function *G) {
-  if (F->mayBeOverridden()) {
-    assert(G->mayBeOverridden());
+  if (F->isInterposable()) {
+    assert(G->isInterposable());
 
     // Make them both thunks to the same internal function.
     Function *H = Function::Create(F->getFunctionType(), F->getLinkage(), "",
@@ -1829,20 +1822,16 @@ bool MergeFunctions::insert(Function *NewFunction) {
   // important when operating on more than one module independently to prevent
   // cycles of thunks calling each other when the modules are linked together.
   //
-  // When one function is weak and the other is strong there is an order imposed
-  // already. We process strong functions before weak functions.
-  if ((OldF.getFunc()->mayBeOverridden() && NewFunction->mayBeOverridden()) ||
-      (!OldF.getFunc()->mayBeOverridden() && !NewFunction->mayBeOverridden()))
-    if (OldF.getFunc()->getName() > NewFunction->getName()) {
-      // Swap the two functions.
-      Function *F = OldF.getFunc();
-      replaceFunctionInTree(*Result.first, NewFunction);
-      NewFunction = F;
-      assert(OldF.getFunc() != F && "Must have swapped the functions.");
-    }
-
-  // Never thunk a strong function to a weak function.
-  assert(!OldF.getFunc()->mayBeOverridden() || NewFunction->mayBeOverridden());
+  // First of all, we process strong functions before weak functions.
+  if ((OldF.getFunc()->isInterposable() && !NewFunction->isInterposable()) ||
+     (OldF.getFunc()->isInterposable() == NewFunction->isInterposable() &&
+       OldF.getFunc()->getName() > NewFunction->getName())) {
+    // Swap the two functions.
+    Function *F = OldF.getFunc();
+    replaceFunctionInTree(*Result.first, NewFunction);
+    NewFunction = F;
+    assert(OldF.getFunc() != F && "Must have swapped the functions.");
+  }
 
   DEBUG(dbgs() << "  " << OldF.getFunc()->getName()
                << " == " << NewFunction->getName() << '\n');

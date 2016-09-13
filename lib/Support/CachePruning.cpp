@@ -14,6 +14,7 @@
 #include "llvm/Support/CachePruning.h"
 
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/Errc.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
@@ -54,8 +55,8 @@ bool CachePruning::prune() {
   sys::path::append(TimestampFile, "llvmcache.timestamp");
   sys::fs::file_status FileStatus;
   sys::TimeValue CurrentTime = sys::TimeValue::now();
-  if (sys::fs::status(TimestampFile, FileStatus)) {
-    if (errno == ENOENT) {
+  if (auto EC = sys::fs::status(TimestampFile, FileStatus)) {
+    if (EC == errc::no_such_file_or_directory) {
       // If the timestamp file wasn't there, create one now.
       writeTimestampFile(TimestampFile);
     } else {
@@ -87,9 +88,9 @@ bool CachePruning::prune() {
   std::set<std::pair<uint64_t, std::string>> FileSizes;
   uint64_t TotalSize = 0;
   // Helper to add a path to the set of files to consider for size-based
-  // pruning, sorted by last accessed time.
+  // pruning, sorted by size.
   auto AddToFileListForSizePruning =
-      [&](StringRef Path, sys::TimeValue FileAccessTime) {
+      [&](StringRef Path) {
         if (!ShouldComputeSize)
           return;
         TotalSize += FileStatus.getSize();
@@ -127,7 +128,7 @@ bool CachePruning::prune() {
     }
 
     // Leave it here for now, but add it to the list of size-based pruning.
-    AddToFileListForSizePruning(File->path(), FileAccessTime);
+    AddToFileListForSizePruning(File->path());
   }
 
   // Prune for size now if needed

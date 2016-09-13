@@ -250,6 +250,7 @@ bool llvm::inferLibFuncAttributes(Function &F, const TargetLibraryInfo &TLI) {
     Changed |= setDoesNotCapture(F, 2);
     return Changed;
   case LibFunc::memcpy:
+  case LibFunc::mempcpy:
   case LibFunc::memccpy:
   case LibFunc::memmove:
     Changed |= setDoesNotThrow(F);
@@ -694,6 +695,11 @@ bool llvm::inferLibFuncAttributes(Function &F, const TargetLibraryInfo &TLI) {
     Changed |= setDoesNotCapture(F, 2);
     Changed |= setOnlyReadsMemory(F, 2);
     return Changed;
+  // int __nvvm_reflect(const char *)
+  case LibFunc::nvvm_reflect:
+    Changed |= setDoesNotAccessMemory(F);
+    Changed |= setDoesNotThrow(F);
+    return Changed;
 
   default:
     // FIXME: It'd be really nice to cover all the library functions we're
@@ -872,7 +878,6 @@ static void appendTypeSuffix(Value *Op, StringRef &Name,
 
     Name = NameBuffer;
   }  
-  return;
 }
 
 Value *llvm::emitUnaryFloatFnCall(Value *Op, StringRef Name, IRBuilder<> &B,

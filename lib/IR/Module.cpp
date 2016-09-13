@@ -13,7 +13,6 @@
 
 #include "llvm/IR/Module.h"
 #include "SymbolTableListTraitsImpl.h"
-#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallString.h"
@@ -43,6 +42,7 @@ using namespace llvm;
 template class llvm::SymbolTableListTraits<Function>;
 template class llvm::SymbolTableListTraits<GlobalVariable>;
 template class llvm::SymbolTableListTraits<GlobalAlias>;
+template class llvm::SymbolTableListTraits<GlobalIFunc>;
 
 //===----------------------------------------------------------------------===//
 // Primitive Module methods.
@@ -61,6 +61,7 @@ Module::~Module() {
   GlobalList.clear();
   FunctionList.clear();
   AliasList.clear();
+  IFuncList.clear();
   NamedMDList.clear();
   delete ValSymTab;
   delete static_cast<StringMap<NamedMDNode *> *>(NamedMDSymTab);
@@ -250,6 +251,10 @@ Constant *Module::getOrInsertGlobal(StringRef Name, Type *Ty) {
 //
 GlobalAlias *Module::getNamedAlias(StringRef Name) const {
   return dyn_cast_or_null<GlobalAlias>(getNamedValue(Name));
+}
+
+GlobalIFunc *Module::getNamedIFunc(StringRef Name) const {
+  return dyn_cast_or_null<GlobalIFunc>(getNamedValue(Name));
 }
 
 /// getNamedMetadata - Return the first NamedMDNode in the module with the
@@ -453,6 +458,9 @@ void Module::dropAllReferences() {
 
   for (GlobalAlias &GA : aliases())
     GA.dropAllReferences();
+
+  for (GlobalIFunc &GIF : ifuncs())
+    GIF.dropAllReferences();
 }
 
 unsigned Module::getDwarfVersion() const {
@@ -479,7 +487,7 @@ PICLevel::Level Module::getPICLevel() const {
   auto *Val = cast_or_null<ConstantAsMetadata>(getModuleFlag("PIC Level"));
 
   if (!Val)
-    return PICLevel::Default;
+    return PICLevel::NotPIC;
 
   return static_cast<PICLevel::Level>(
       cast<ConstantInt>(Val->getValue())->getZExtValue());
@@ -489,16 +497,26 @@ void Module::setPICLevel(PICLevel::Level PL) {
   addModuleFlag(ModFlagBehavior::Error, "PIC Level", PL);
 }
 
-void Module::setMaximumFunctionCount(uint64_t Count) {
-  addModuleFlag(ModFlagBehavior::Error, "MaxFunctionCount", Count);
+PIELevel::Level Module::getPIELevel() const {
+  auto *Val = cast_or_null<ConstantAsMetadata>(getModuleFlag("PIE Level"));
+
+  if (!Val)
+    return PIELevel::Default;
+
+  return static_cast<PIELevel::Level>(
+      cast<ConstantInt>(Val->getValue())->getZExtValue());
 }
 
-Optional<uint64_t> Module::getMaximumFunctionCount() {
-  auto *Val =
-      cast_or_null<ConstantAsMetadata>(getModuleFlag("MaxFunctionCount"));
-  if (!Val)
-    return None;
-  return cast<ConstantInt>(Val->getValue())->getZExtValue();
+void Module::setPIELevel(PIELevel::Level PL) {
+  addModuleFlag(ModFlagBehavior::Error, "PIE Level", PL);
+}
+
+void Module::setProfileSummary(Metadata *M) {
+  addModuleFlag(ModFlagBehavior::Error, "ProfileSummary", M);
+}
+
+Metadata *Module::getProfileSummary() {
+  return getModuleFlag("ProfileSummary");
 }
 
 GlobalVariable *llvm::collectUsedGlobalVariables(

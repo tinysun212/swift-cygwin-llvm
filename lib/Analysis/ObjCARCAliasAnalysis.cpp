@@ -131,11 +131,9 @@ ModRefInfo ObjCARCAAResult::getModRefInfo(ImmutableCallSite CS,
   return AAResultBase::getModRefInfo(CS, Loc);
 }
 
-ObjCARCAAResult ObjCARCAA::run(Function &F, AnalysisManager<Function> *AM) {
+ObjCARCAAResult ObjCARCAA::run(Function &F, FunctionAnalysisManager &AM) {
   return ObjCARCAAResult(F.getParent()->getDataLayout());
 }
-
-char ObjCARCAA::PassID;
 
 char ObjCARCAAWrapperPass::ID = 0;
 INITIALIZE_PASS(ObjCARCAAWrapperPass, "objc-arc-aa",

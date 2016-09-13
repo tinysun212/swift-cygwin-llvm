@@ -513,6 +513,7 @@ lltok::Kind LLLexer::LexIdentifier() {
   KEYWORD(hidden);
   KEYWORD(protected);
   KEYWORD(unnamed_addr);
+  KEYWORD(local_unnamed_addr);
   KEYWORD(externally_initialized);
   KEYWORD(extern_weak);
   KEYWORD(external);
@@ -560,6 +561,7 @@ lltok::Kind LLLexer::LexIdentifier() {
   KEYWORD(addrspace);
   KEYWORD(section);
   KEYWORD(alias);
+  KEYWORD(ifunc);
   KEYWORD(module);
   KEYWORD(asm);
   KEYWORD(sideeffect);
@@ -580,6 +582,8 @@ lltok::Kind LLLexer::LexIdentifier() {
   KEYWORD(arm_aapcscc);
   KEYWORD(arm_aapcs_vfpcc);
   KEYWORD(msp430_intrcc);
+  KEYWORD(avr_intrcc);
+  KEYWORD(avr_signalcc);
   KEYWORD(ptx_kernel);
   KEYWORD(ptx_device);
   KEYWORD(spir_kernel);
@@ -597,6 +601,11 @@ lltok::Kind LLLexer::LexIdentifier() {
   KEYWORD(hhvmcc);
   KEYWORD(hhvm_ccc);
   KEYWORD(cxx_fast_tlscc);
+  KEYWORD(amdgpu_vs);
+  KEYWORD(amdgpu_gs);
+  KEYWORD(amdgpu_ps);
+  KEYWORD(amdgpu_cs);
+  KEYWORD(amdgpu_kernel);
 
   KEYWORD(cc);
   KEYWORD(c);
@@ -604,6 +613,7 @@ lltok::Kind LLLexer::LexIdentifier() {
   KEYWORD(attributes);
 
   KEYWORD(alwaysinline);
+  KEYWORD(allocsize);
   KEYWORD(argmemonly);
   KEYWORD(builtin);
   KEYWORD(byval);
@@ -650,6 +660,7 @@ lltok::Kind LLLexer::LexIdentifier() {
   KEYWORD(swifterror);
   KEYWORD(swiftself);
   KEYWORD(uwtable);
+  KEYWORD(writeonly);
   KEYWORD(zeroext);
 
   KEYWORD(type);
@@ -784,6 +795,7 @@ lltok::Kind LLLexer::LexIdentifier() {
   DWKEYWORD(ATE, DwarfAttEncoding);
   DWKEYWORD(VIRTUALITY, DwarfVirtuality);
   DWKEYWORD(LANG, DwarfLang);
+  DWKEYWORD(CC, DwarfCC);
   DWKEYWORD(OP, DwarfOp);
   DWKEYWORD(MACINFO, DwarfMacinfo);
 #undef DWKEYWORD
@@ -805,7 +817,7 @@ lltok::Kind LLLexer::LexIdentifier() {
     int len = CurPtr-TokStart-3;
     uint32_t bits = len * 4;
     StringRef HexStr(TokStart + 3, len);
-    if (!std::all_of(HexStr.begin(), HexStr.end(), isxdigit)) {
+    if (!all_of(HexStr, isxdigit)) {
       // Bad token, return it as an error.
       CurPtr = TokStart+3;
       return lltok::Error;
@@ -859,7 +871,8 @@ lltok::Kind LLLexer::Lex0x() {
     // HexFPConstant - Floating point constant represented in IEEE format as a
     // hexadecimal number for when exponential notation is not precise enough.
     // Half, Float, and double only.
-    APFloatVal = APFloat(BitsToDouble(HexIntToVal(TokStart+2, CurPtr)));
+    APFloatVal = APFloat(APFloat::IEEEdouble,
+                         APInt(64, HexIntToVal(TokStart + 2, CurPtr)));
     return lltok::APFloat;
   }
 
@@ -949,7 +962,8 @@ lltok::Kind LLLexer::LexDigitOrNegative() {
     }
   }
 
-  APFloatVal = APFloat(std::atof(TokStart));
+  APFloatVal = APFloat(APFloat::IEEEdouble,
+                       StringRef(TokStart, CurPtr - TokStart));
   return lltok::APFloat;
 }
 
@@ -985,6 +999,7 @@ lltok::Kind LLLexer::LexPositive() {
     }
   }
 
-  APFloatVal = APFloat(std::atof(TokStart));
+  APFloatVal = APFloat(APFloat::IEEEdouble,
+                       StringRef(TokStart, CurPtr - TokStart));
   return lltok::APFloat;
 }

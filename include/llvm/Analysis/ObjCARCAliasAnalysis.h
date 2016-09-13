@@ -61,20 +61,14 @@ public:
 };
 
 /// Analysis pass providing a never-invalidated alias analysis result.
-class ObjCARCAA {
+class ObjCARCAA : public AnalysisInfoMixin<ObjCARCAA> {
+  friend AnalysisInfoMixin<ObjCARCAA>;
+  static char PassID;
+
 public:
   typedef ObjCARCAAResult Result;
 
-  /// \brief Opaque, unique identifier for this analysis pass.
-  static void *ID() { return (void *)&PassID; }
-
-  ObjCARCAAResult run(Function &F, AnalysisManager<Function> *AM);
-
-  /// \brief Provide access to a name for this pass for debugging purposes.
-  static StringRef name() { return "ObjCARCAA"; }
-
-private:
-  static char PassID;
+  ObjCARCAAResult run(Function &F, FunctionAnalysisManager &AM);
 };
 
 /// Legacy wrapper pass to provide the ObjCARCAAResult object.

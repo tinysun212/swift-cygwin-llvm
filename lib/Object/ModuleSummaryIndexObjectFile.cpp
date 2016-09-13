@@ -36,10 +36,7 @@ std::unique_ptr<ModuleSummaryIndex> ModuleSummaryIndexObjectFile::takeIndex() {
 ErrorOr<MemoryBufferRef>
 ModuleSummaryIndexObjectFile::findBitcodeInObject(const ObjectFile &Obj) {
   for (const SectionRef &Sec : Obj.sections()) {
-    StringRef SecName;
-    if (std::error_code EC = Sec.getName(SecName))
-      return EC;
-    if (SecName == ".llvmbc") {
+    if (Sec.isBitcode()) {
       StringRef SecContents;
       if (std::error_code EC = Sec.getContents(SecContents))
         return EC;
@@ -59,10 +56,10 @@ ModuleSummaryIndexObjectFile::findBitcodeInMemBuffer(MemoryBufferRef Object) {
   case sys::fs::file_magic::elf_relocatable:
   case sys::fs::file_magic::macho_object:
   case sys::fs::file_magic::coff_object: {
-    ErrorOr<std::unique_ptr<ObjectFile>> ObjFile =
+    Expected<std::unique_ptr<ObjectFile>> ObjFile =
         ObjectFile::createObjectFile(Object, Type);
     if (!ObjFile)
-      return ObjFile.getError();
+      return errorToErrorCode(ObjFile.takeError());
     return findBitcodeInObject(*ObjFile->get());
   }
   default:
@@ -73,7 +70,8 @@ ModuleSummaryIndexObjectFile::findBitcodeInMemBuffer(MemoryBufferRef Object) {
 // Looks for module summary index in the given memory buffer.
 // returns true if found, else false.
 bool ModuleSummaryIndexObjectFile::hasGlobalValueSummaryInMemBuffer(
-    MemoryBufferRef Object, DiagnosticHandlerFunction DiagnosticHandler) {
+    MemoryBufferRef Object,
+    const DiagnosticHandlerFunction &DiagnosticHandler) {
   ErrorOr<MemoryBufferRef> BCOrErr = findBitcodeInMemBuffer(Object);
   if (!BCOrErr)
     return false;
@@ -86,7 +84,8 @@ bool ModuleSummaryIndexObjectFile::hasGlobalValueSummaryInMemBuffer(
 // module summary/index.
 ErrorOr<std::unique_ptr<ModuleSummaryIndexObjectFile>>
 ModuleSummaryIndexObjectFile::create(
-    MemoryBufferRef Object, DiagnosticHandlerFunction DiagnosticHandler) {
+    MemoryBufferRef Object,
+    const DiagnosticHandlerFunction &DiagnosticHandler) {
   std::unique_ptr<ModuleSummaryIndex> Index;
 
   ErrorOr<MemoryBufferRef> BCOrErr = findBitcodeInMemBuffer(Object);
@@ -108,7 +107,7 @@ ModuleSummaryIndexObjectFile::create(
 // Parse the module summary index out of an IR file and return the summary
 // index object if found, or nullptr if not.
 ErrorOr<std::unique_ptr<ModuleSummaryIndex>> llvm::getModuleSummaryIndexForFile(
-    StringRef Path, DiagnosticHandlerFunction DiagnosticHandler) {
+    StringRef Path, const DiagnosticHandlerFunction &DiagnosticHandler) {
   ErrorOr<std::unique_ptr<MemoryBuffer>> FileOrErr =
       MemoryBuffer::getFileOrSTDIN(Path);
   std::error_code EC = FileOrErr.getError();

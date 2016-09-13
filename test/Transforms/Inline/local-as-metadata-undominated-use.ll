@@ -36,7 +36,6 @@ declare void @llvm.dbg.value(metadata, i64, metadata, metadata)
 
 ; CHECK: ![[EMPTY]] = !{}
 !2 = !{}
-!3 = !{!4}
 !4 = distinct !DISubprogram(name: "foo", scope: !1, file: !1, line: 2, type: !5, isLocal: false, isDefinition: true, scopeLine: 2, flags: DIFlagPrototyped, isOptimized: true, unit: !0)
 !5 = !DISubroutineType(types: !6)
 !6 = !{!7, !7}

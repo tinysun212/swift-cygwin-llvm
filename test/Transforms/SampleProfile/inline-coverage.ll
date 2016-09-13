@@ -1,4 +1,5 @@
-; RUN: opt < %s -sample-profile -sample-profile-file=%S/Inputs/inline-coverage.prof -sample-profile-check-record-coverage=100 -sample-profile-check-sample-coverage=110 -pass-remarks=sample-profile -o /dev/null 2>&1 | FileCheck %s
+; RUN: opt < %s -instcombine -sample-profile -sample-profile-file=%S/Inputs/inline-coverage.prof -sample-profile-check-record-coverage=100 -sample-profile-check-sample-coverage=110 -pass-remarks=sample-profile -o /dev/null 2>&1 | FileCheck %s
+; RUN: opt < %s -passes="function(instcombine),sample-profile" -sample-profile-file=%S/Inputs/inline-coverage.prof -sample-profile-check-record-coverage=100 -sample-profile-check-sample-coverage=110 -pass-remarks=sample-profile -o /dev/null 2>&1 | FileCheck %s
 ;
 ; Original code:
 ;
@@ -16,7 +17,7 @@
 ;    12    }
 ;
 ; CHECK: remark: coverage.cc:10:12: inlined hot callee '_Z3fool' with 172746 samples into 'main'
-; CHECK: remark: coverage.cc:9:19: Applied 23478 samples from profile (offset: 2.1)
+; CHECK: remark: coverage.cc:9:21: Applied 23478 samples from profile (offset: 2.1)
 ; CHECK: remark: coverage.cc:10:16: Applied 23478 samples from profile (offset: 3)
 ; CHECK: remark: coverage.cc:4:10: Applied 31878 samples from profile (offset: 1)
 ; CHECK: remark: coverage.cc:11:10: Applied 0 samples from profile (offset: 4)

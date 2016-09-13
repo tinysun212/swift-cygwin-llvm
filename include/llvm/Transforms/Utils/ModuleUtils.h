@@ -14,12 +14,12 @@
 #ifndef LLVM_TRANSFORMS_UTILS_MODULEUTILS_H
 #define LLVM_TRANSFORMS_UTILS_MODULEUTILS_H
 
-#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringRef.h"
 #include <utility> // for std::pair
 
 namespace llvm {
 
+template <typename T> class ArrayRef;
 class Module;
 class Function;
 class GlobalValue;
@@ -33,10 +33,12 @@ class Type;
 /// This wraps the function in the appropriate structure and stores it along
 /// side other global constructors. For details see
 /// http://llvm.org/docs/LangRef.html#intg_global_ctors
-void appendToGlobalCtors(Module &M, Function *F, int Priority);
+void appendToGlobalCtors(Module &M, Function *F, int Priority,
+                         Constant *Data = nullptr);
 
 /// Same as appendToGlobalCtors(), but for global dtors.
-void appendToGlobalDtors(Module &M, Function *F, int Priority);
+void appendToGlobalDtors(Module &M, Function *F, int Priority,
+                         Constant *Data = nullptr);
 
 // Validate the result of Module::getOrInsertFunction called for an interface
 // function of given sanitizer. If the instrumented module defines a function

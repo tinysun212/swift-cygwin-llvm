@@ -19,13 +19,14 @@
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/IRReader/IRReader.h"
-#include "llvm/LTO/LTOCodeGenerator.h"
-#include "llvm/LTO/LTOModule.h"
-#include "llvm/LTO/ThinLTOCodeGenerator.h"
+#include "llvm/LTO/legacy/LTOCodeGenerator.h"
+#include "llvm/LTO/legacy/LTOModule.h"
+#include "llvm/LTO/legacy/ThinLTOCodeGenerator.h"
 #include "llvm/Object/ModuleSummaryIndexObjectFile.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/ManagedStatic.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Support/PrettyStackTrace.h"
 #include "llvm/Support/Signals.h"
 #include "llvm/Support/SourceMgr.h"
@@ -66,6 +67,8 @@ static cl::opt<bool>
 
 enum ThinLTOModes {
   THINLINK,
+  THINDISTRIBUTE,
+  THINEMITIMPORTS,
   THINPROMOTE,
   THINIMPORT,
   THININTERNALIZE,
@@ -80,6 +83,10 @@ cl::opt<ThinLTOModes> ThinLTOMode(
         clEnumValN(
             THINLINK, "thinlink",
             "ThinLink: produces the index by linking only the summaries."),
+        clEnumValN(THINDISTRIBUTE, "distributedindexes",
+                   "Produces individual indexes for distributed backends."),
+        clEnumValN(THINEMITIMPORTS, "emitimports",
+                   "Emit imports files for distributed backends."),
         clEnumValN(THINPROMOTE, "promote",
                    "Perform pre-import promotion (requires -thinlto-index)."),
         clEnumValN(THINIMPORT, "import", "Perform both promotion and "
@@ -98,6 +105,13 @@ static cl::opt<std::string>
                  cl::desc("Provide the index produced by a ThinLink, required "
                           "to perform the promotion and/or importing."));
 
+static cl::opt<std::string> ThinLTOPrefixReplace(
+    "thinlto-prefix-replace",
+    cl::desc("Control where files for distributed backends are "
+             "created. Expects 'oldprefix;newprefix' and if path "
+             "prefix of output file is oldprefix it will be "
+             "replaced with newprefix."));
+
 static cl::opt<std::string> ThinLTOModuleId(
     "thinlto-module-id",
     cl::desc("For the module ID for the file to process, useful to "
@@ -105,6 +119,11 @@ static cl::opt<std::string> ThinLTOModuleId(
 
 static cl::opt<std::string>
     ThinLTOCacheDir("thinlto-cache-dir", cl::desc("Enable ThinLTO caching."));
+
+static cl::opt<std::string> ThinLTOSaveTempsPrefix(
+    "thinlto-save-temps",
+    cl::desc("Save ThinLTO temp files using filenames created by adding "
+             "suffixes to the given file path prefix."));
 
 static cl::opt<bool>
     SaveModuleFile("save-merged-module", cl::init(false),
@@ -202,8 +221,8 @@ static void diagnosticHandler(const DiagnosticInfo &DI) {
     exit(1);
 }
 
-static void diagnosticHandlerWithContenxt(const DiagnosticInfo &DI,
-                                          void *Context) {
+static void diagnosticHandlerWithContext(const DiagnosticInfo &DI,
+                                         void *Context) {
   diagnosticHandler(DI);
 }
 
@@ -235,8 +254,11 @@ getLocalLTOModule(StringRef Path, std::unique_ptr<MemoryBuffer> &Buffer,
   error(BufferOrErr, "error loading file '" + Path + "'");
   Buffer = std::move(BufferOrErr.get());
   CurrentActivity = ("loading file '" + Path + "'").str();
+  std::unique_ptr<LLVMContext> Context = llvm::make_unique<LLVMContext>();
+  Context->setDiagnosticHandler(diagnosticHandlerWithContext, nullptr, true);
   ErrorOr<std::unique_ptr<LTOModule>> Ret = LTOModule::createInLocalContext(
-      Buffer->getBufferStart(), Buffer->getBufferSize(), Options, Path);
+      std::move(Context), Buffer->getBufferStart(), Buffer->getBufferSize(),
+      Options, Path);
   CurrentActivity = "";
   maybeVerifyModule((*Ret)->getModule());
   return std::move(*Ret);
@@ -272,7 +294,7 @@ static void createCombinedModuleSummaryIndex() {
     CurrentActivity = "loading file '" + Filename + "'";
     ErrorOr<std::unique_ptr<ModuleSummaryIndex>> IndexOrErr =
         llvm::getModuleSummaryIndexForFile(Filename, diagnosticHandler);
-    error(IndexOrErr, "error: " + CurrentActivity);
+    error(IndexOrErr, "error " + CurrentActivity);
     std::unique_ptr<ModuleSummaryIndex> Index = std::move(IndexOrErr.get());
     CurrentActivity = "";
     // Skip files without a module summary.
@@ -287,6 +309,37 @@ static void createCombinedModuleSummaryIndex() {
   error(EC, "error opening the file '" + OutputFilename + ".thinlto.bc'");
   WriteIndexToFile(CombinedIndex, OS);
   OS.close();
+}
+
+/// Parse the thinlto_prefix_replace option into the \p OldPrefix and
+/// \p NewPrefix strings, if it was specified.
+static void getThinLTOOldAndNewPrefix(std::string &OldPrefix,
+                                      std::string &NewPrefix) {
+  assert(ThinLTOPrefixReplace.empty() ||
+         ThinLTOPrefixReplace.find(";") != StringRef::npos);
+  StringRef PrefixReplace = ThinLTOPrefixReplace;
+  std::pair<StringRef, StringRef> Split = PrefixReplace.split(";");
+  OldPrefix = Split.first.str();
+  NewPrefix = Split.second.str();
+}
+
+/// Given the original \p Path to an output file, replace any path
+/// prefix matching \p OldPrefix with \p NewPrefix. Also, create the
+/// resulting directory if it does not yet exist.
+static std::string getThinLTOOutputFile(const std::string &Path,
+                                        const std::string &OldPrefix,
+                                        const std::string &NewPrefix) {
+  if (OldPrefix.empty() && NewPrefix.empty())
+    return Path;
+  SmallString<128> NewPath(Path);
+  llvm::sys::path::replace_path_prefix(NewPath, OldPrefix, NewPrefix);
+  StringRef ParentPath = llvm::sys::path::parent_path(NewPath.str());
+  if (!ParentPath.empty()) {
+    // Make sure the new directory exists, creating it if necessary.
+    if (std::error_code EC = llvm::sys::fs::create_directories(ParentPath))
+      error(EC, "error creating the directory '" + ParentPath + "'");
+  }
+  return NewPath.str();
 }
 
 namespace thinlto {
@@ -346,7 +399,7 @@ public:
   ThinLTOCodeGenerator ThinGenerator;
 
   ThinLTOProcessing(const TargetOptions &Options) {
-    ThinGenerator.setCodePICModel(RelocModel);
+    ThinGenerator.setCodePICModel(getRelocModel());
     ThinGenerator.setTargetOptions(Options);
     ThinGenerator.setCacheDir(ThinLTOCacheDir);
 
@@ -359,6 +412,10 @@ public:
     switch (ThinLTOMode) {
     case THINLINK:
       return thinLink();
+    case THINDISTRIBUTE:
+      return distributedIndexes();
+    case THINEMITIMPORTS:
+      return emitImports();
     case THINPROMOTE:
       return promote();
     case THINIMPORT:
@@ -401,9 +458,66 @@ private:
     return;
   }
 
+  /// Load the combined index from disk, then compute and generate
+  /// individual index files suitable for ThinLTO distributed backend builds
+  /// on the files mentioned on the command line (these must match the index
+  /// content).
+  void distributedIndexes() {
+    if (InputFilenames.size() != 1 && !OutputFilename.empty())
+      report_fatal_error("Can't handle a single output filename and multiple "
+                         "input files, do not provide an output filename and "
+                         "the output files will be suffixed from the input "
+                         "ones.");
+
+    std::string OldPrefix, NewPrefix;
+    getThinLTOOldAndNewPrefix(OldPrefix, NewPrefix);
+
+    auto Index = loadCombinedIndex();
+    for (auto &Filename : InputFilenames) {
+      // Build a map of module to the GUIDs and summary objects that should
+      // be written to its index.
+      std::map<std::string, GVSummaryMapTy> ModuleToSummariesForIndex;
+      ThinLTOCodeGenerator::gatherImportedSummariesForModule(
+          Filename, *Index, ModuleToSummariesForIndex);
+
+      std::string OutputName = OutputFilename;
+      if (OutputName.empty()) {
+        OutputName = Filename + ".thinlto.bc";
+      }
+      OutputName = getThinLTOOutputFile(OutputName, OldPrefix, NewPrefix);
+      std::error_code EC;
+      raw_fd_ostream OS(OutputName, EC, sys::fs::OpenFlags::F_None);
+      error(EC, "error opening the file '" + OutputName + "'");
+      WriteIndexToFile(*Index, OS, &ModuleToSummariesForIndex);
+    }
+  }
+
+  /// Load the combined index from disk, compute the imports, and emit
+  /// the import file lists for each module to disk.
+  void emitImports() {
+    if (InputFilenames.size() != 1 && !OutputFilename.empty())
+      report_fatal_error("Can't handle a single output filename and multiple "
+                         "input files, do not provide an output filename and "
+                         "the output files will be suffixed from the input "
+                         "ones.");
+
+    std::string OldPrefix, NewPrefix;
+    getThinLTOOldAndNewPrefix(OldPrefix, NewPrefix);
+
+    auto Index = loadCombinedIndex();
+    for (auto &Filename : InputFilenames) {
+      std::string OutputName = OutputFilename;
+      if (OutputName.empty()) {
+        OutputName = Filename + ".imports";
+      }
+      OutputName = getThinLTOOutputFile(OutputName, OldPrefix, NewPrefix);
+      ThinLTOCodeGenerator::emitImports(Filename, OutputName, *Index);
+    }
+  }
+
   /// Load the combined index from disk, then load every file referenced by
   /// the index and add them to the generator, finally perform the promotion
-  /// on the files mentionned on the command line (these must match the index
+  /// on the files mentioned on the command line (these must match the index
   /// content).
   void promote() {
     if (InputFilenames.size() != 1 && !OutputFilename.empty())
@@ -429,7 +543,7 @@ private:
 
   /// Load the combined index from disk, then load every file referenced by
   /// the index and add them to the generator, then performs the promotion and
-  /// cross module importing on the files mentionned on the command line
+  /// cross module importing on the files mentioned on the command line
   /// (these must match the index content).
   void import() {
     if (InputFilenames.size() != 1 && !OutputFilename.empty())
@@ -563,6 +677,8 @@ private:
       ThinGenerator.addModule(Filename, InputBuffers.back()->getBuffer());
     }
 
+    if (!ThinLTOSaveTempsPrefix.empty())
+      ThinGenerator.setSaveTempsDir(ThinLTOSaveTempsPrefix);
     ThinGenerator.run();
 
     auto &Binaries = ThinGenerator.getProducedBinaries();
@@ -586,7 +702,7 @@ private:
 
 int main(int argc, char **argv) {
   // Print a stack trace if we signal out.
-  sys::PrintStackTraceOnErrorSignal();
+  sys::PrintStackTraceOnErrorSignal(argv[0]);
   PrettyStackTraceProgram X(argc, argv);
 
   llvm_shutdown_obj Y; // Call llvm_shutdown() on exit.
@@ -640,14 +756,14 @@ int main(int argc, char **argv) {
   unsigned BaseArg = 0;
 
   LLVMContext Context;
-  Context.setDiagnosticHandler(diagnosticHandlerWithContenxt, nullptr, true);
+  Context.setDiagnosticHandler(diagnosticHandlerWithContext, nullptr, true);
 
   LTOCodeGenerator CodeGen(Context);
 
   if (UseDiagnosticHandler)
     CodeGen.setDiagnosticHandler(handleDiagnostics, nullptr);
 
-  CodeGen.setCodePICModel(RelocModel);
+  CodeGen.setCodePICModel(getRelocModel());
 
   CodeGen.setDebugInfo(LTO_DEBUG_MODEL_DWARF);
   CodeGen.setTargetOptions(Options);
@@ -663,7 +779,6 @@ int main(int argc, char **argv) {
     CurrentActivity = "loading file '" + InputFilenames[i] + "'";
     ErrorOr<std::unique_ptr<LTOModule>> ModuleOrErr =
         LTOModule::createFromFile(Context, InputFilenames[i].c_str(), Options);
-    error(ModuleOrErr, "error " + CurrentActivity);
     std::unique_ptr<LTOModule> &Module = *ModuleOrErr;
     CurrentActivity = "";
 

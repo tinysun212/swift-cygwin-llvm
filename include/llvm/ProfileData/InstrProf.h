@@ -1,4 +1,4 @@
-//=-- InstrProf.h - Instrumented profiling format support ---------*- C++ -*-=//
+//===-- InstrProf.h - Instrumented profiling format support -----*- C++ -*-===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -13,24 +13,22 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_PROFILEDATA_INSTRPROF_H_
-#define LLVM_PROFILEDATA_INSTRPROF_H_
+#ifndef LLVM_PROFILEDATA_INSTRPROF_H
+#define LLVM_PROFILEDATA_INSTRPROF_H
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/StringSet.h"
-#include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalValue.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/ProfileData/InstrProfData.inc"
+#include "llvm/ProfileData/ProfileCommon.h"
 #include "llvm/Support/Endian.h"
 #include "llvm/Support/ErrorHandling.h"
-#include "llvm/Support/ErrorOr.h"
 #include "llvm/Support/MD5.h"
 #include "llvm/Support/MathExtras.h"
 #include <cstdint>
 #include <list>
-#include <map>
 #include <system_error>
 #include <vector>
 
@@ -60,6 +58,20 @@ inline StringRef getInstrProfDataSectionName(bool AddSegment) {
                     : INSTR_PROF_DATA_SECT_NAME_STR;
 }
 
+/// Return the name of data section containing pointers to value profile
+/// counters/nodes.
+inline StringRef getInstrProfValuesSectionName(bool AddSegment) {
+  return AddSegment ? "__DATA," INSTR_PROF_VALS_SECT_NAME_STR
+                    : INSTR_PROF_VALS_SECT_NAME_STR;
+}
+
+/// Return the name of data section containing nodes holdling value
+/// profiling data.
+inline StringRef getInstrProfVNodesSectionName(bool AddSegment) {
+  return AddSegment ? "__DATA," INSTR_PROF_VNODES_SECT_NAME_STR
+                    : INSTR_PROF_VNODES_SECT_NAME_STR;
+}
+
 /// Return the name profile runtime entry point to do value profiling
 /// for a given site.
 inline StringRef getInstrProfValueProfFuncName() {
@@ -81,6 +93,12 @@ inline StringRef getInstrProfDataVarPrefix() { return "__profd_"; }
 
 /// Return the name prefix of profile counter variables.
 inline StringRef getInstrProfCountersVarPrefix() { return "__profc_"; }
+
+/// Return the name prefix of value profile variables.
+inline StringRef getInstrProfValuesVarPrefix() { return "__profvp_"; }
+
+/// Return the name of value profile node array variables:
+inline StringRef getInstrProfVNodesVarName() { return "__llvm_prf_vnodes"; }
 
 /// Return the name prefix of the COMDAT group for instrumentation variables
 /// associated with a COMDAT function.
@@ -137,19 +155,13 @@ inline StringRef getInstrProfInitFuncName() { return "__llvm_profile_init"; }
 /// A reference to the variable causes the linker to link in the runtime
 /// initialization module (which defines the hook variable).
 inline StringRef getInstrProfRuntimeHookVarName() {
-  return "__llvm_profile_runtime";
+  return INSTR_PROF_QUOTE(INSTR_PROF_PROFILE_RUNTIME_VAR);
 }
 
 /// Return the name of the compiler generated function that references the
 /// runtime hook variable. The function is a weak global.
 inline StringRef getInstrProfRuntimeHookVarUseFuncName() {
   return "__llvm_profile_runtime_user";
-}
-
-/// Return the name of the profile runtime interface that overrides the default
-/// profile data file name.
-inline StringRef getInstrProfFileOverriderFuncName() {
-  return "__llvm_profile_override_default_filename";
 }
 
 /// Return the marker used to separate PGO names during serialization.
@@ -205,20 +217,17 @@ StringRef getFuncNameWithoutPrefix(StringRef PGOFuncName,
 ///  third field is the uncompressed strings; otherwise it is the
 /// compressed string. When the string compression is off, the
 /// second field will have value zero.
-std::error_code
-collectPGOFuncNameStrings(const std::vector<std::string> &NameStrs,
-                          bool doCompression, std::string &Result);
+Error collectPGOFuncNameStrings(const std::vector<std::string> &NameStrs,
+                                bool doCompression, std::string &Result);
 /// Produce \c Result string with the same format described above. The input
 /// is vector of PGO function name variables that are referenced.
-std::error_code
-collectPGOFuncNameStrings(const std::vector<GlobalVariable *> &NameVars,
-                          std::string &Result, bool doCompression = true);
+Error collectPGOFuncNameStrings(const std::vector<GlobalVariable *> &NameVars,
+                                std::string &Result, bool doCompression = true);
 class InstrProfSymtab;
 /// \c NameStrings is a string composed of one of more sub-strings encoded in
 /// the format described above. The substrings are seperated by 0 or more zero
 /// bytes. This method decodes the string and populates the \c Symtab.
-std::error_code readPGOFuncNameStrings(StringRef NameStrings,
-                                       InstrProfSymtab &Symtab);
+Error readPGOFuncNameStrings(StringRef NameStrings, InstrProfSymtab &Symtab);
 
 enum InstrProfValueKind : uint32_t {
 #define VALUE_PROF_KIND(Enumerator, Value) Enumerator = Value,
@@ -252,14 +261,16 @@ bool getValueProfDataFromInst(const Instruction &Inst,
 inline StringRef getPGOFuncNameMetadataName() { return "PGOFuncName"; }
 
 /// Return the PGOFuncName meta data associated with a function.
-inline MDNode *getPGOFuncNameMetadata(const Function &F) {
-  return F.getMetadata(getPGOFuncNameMetadataName());
-}
+MDNode *getPGOFuncNameMetadata(const Function &F);
 
 /// Create the PGOFuncName meta data if PGOFuncName is different from
 /// function's raw name. This should only apply to internal linkage functions
 /// declared by users only.
-void createPGOFuncNameMetadata(Function &F, const std::string &PGOFuncName);
+void createPGOFuncNameMetadata(Function &F, StringRef PGOFuncName);
+
+/// Check if we can use Comdat for profile variables. This will eliminate
+/// the duplicated profile variables for Comdat functions.
+bool needsComdatForCounter(const Function &F, const Module &M);
 
 const std::error_category &instrprof_category();
 
@@ -287,15 +298,96 @@ inline std::error_code make_error_code(instrprof_error E) {
   return std::error_code(static_cast<int>(E), instrprof_category());
 }
 
-inline instrprof_error MergeResult(instrprof_error &Accumulator,
-                                   instrprof_error Result) {
-  // Prefer first error encountered as later errors may be secondary effects of
-  // the initial problem.
-  if (Accumulator == instrprof_error::success &&
-      Result != instrprof_error::success)
-    Accumulator = Result;
-  return Accumulator;
-}
+class InstrProfError : public ErrorInfo<InstrProfError> {
+public:
+  InstrProfError(instrprof_error Err) : Err(Err) {
+    assert(Err != instrprof_error::success && "Not an error");
+  }
+
+  std::string message() const override;
+
+  void log(raw_ostream &OS) const override { OS << message(); }
+
+  std::error_code convertToErrorCode() const override {
+    return make_error_code(Err);
+  }
+
+  instrprof_error get() const { return Err; }
+
+  /// Consume an Error and return the raw enum value contained within it. The
+  /// Error must either be a success value, or contain a single InstrProfError.
+  static instrprof_error take(Error E) {
+    auto Err = instrprof_error::success;
+    handleAllErrors(std::move(E), [&Err](const InstrProfError &IPE) {
+      assert(Err == instrprof_error::success && "Multiple errors encountered");
+      Err = IPE.get();
+    });
+    return Err;
+  }
+
+  static char ID;
+
+private:
+  instrprof_error Err;
+};
+
+class SoftInstrProfErrors {
+  /// Count the number of soft instrprof_errors encountered and keep track of
+  /// the first such error for reporting purposes.
+
+  /// The first soft error encountered.
+  instrprof_error FirstError;
+
+  /// The number of hash mismatches.
+  unsigned NumHashMismatches;
+
+  /// The number of count mismatches.
+  unsigned NumCountMismatches;
+
+  /// The number of counter overflows.
+  unsigned NumCounterOverflows;
+
+  /// The number of value site count mismatches.
+  unsigned NumValueSiteCountMismatches;
+
+public:
+  SoftInstrProfErrors()
+      : FirstError(instrprof_error::success), NumHashMismatches(0),
+        NumCountMismatches(0), NumCounterOverflows(0),
+        NumValueSiteCountMismatches(0) {}
+
+  ~SoftInstrProfErrors() {
+    assert(FirstError == instrprof_error::success &&
+           "Unchecked soft error encountered");
+  }
+
+  /// Track a soft error (\p IE) and increment its associated counter.
+  void addError(instrprof_error IE);
+
+  /// Get the number of hash mismatches.
+  unsigned getNumHashMismatches() const { return NumHashMismatches; }
+
+  /// Get the number of count mismatches.
+  unsigned getNumCountMismatches() const { return NumCountMismatches; }
+
+  /// Get the number of counter overflows.
+  unsigned getNumCounterOverflows() const { return NumCounterOverflows; }
+
+  /// Get the number of value site count mismatches.
+  unsigned getNumValueSiteCountMismatches() const {
+    return NumValueSiteCountMismatches;
+  }
+
+  /// Return the first encountered error and reset FirstError to a success
+  /// value.
+  Error takeError() {
+    if (FirstError == instrprof_error::success)
+      return Error::success();
+    auto E = make_error<InstrProfError>(FirstError);
+    FirstError = instrprof_error::success;
+    return E;
+  }
+};
 
 namespace object {
 class SectionRef;
@@ -339,14 +431,14 @@ public:
   /// only initialize the symtab with reference to the data and
   /// the section base address. The decompression will be delayed
   /// until before it is used. See also \c create(StringRef) method.
-  std::error_code create(object::SectionRef &Section);
+  Error create(object::SectionRef &Section);
   /// This interface is used by reader of CoverageMapping test
   /// format.
-  inline std::error_code create(StringRef D, uint64_t BaseAddr);
+  inline Error create(StringRef D, uint64_t BaseAddr);
   /// \c NameStrings is a string composed of one of more sub-strings
   ///  encoded in the format described in \c collectPGOFuncNameStrings.
   /// This method is a wrapper to \c readPGOFuncNameStrings method.
-  inline std::error_code create(StringRef NameStrings);
+  inline Error create(StringRef NameStrings);
   /// A wrapper interface to populate the PGO symtab with functions
   /// decls from module \c M. This interface is used by transformation
   /// passes such as indirect function call promotion. Variable \c InLTO
@@ -363,10 +455,10 @@ public:
   /// Update the symtab by adding \p FuncName to the table. This interface
   /// is used by the raw and text profile readers.
   void addFuncName(StringRef FuncName) {
-    auto ins = NameTab.insert(FuncName);
-    if (ins.second)
+    auto Ins = NameTab.insert(FuncName);
+    if (Ins.second)
       MD5NameMap.push_back(std::make_pair(
-          IndexedInstrProf::ComputeHash(FuncName), ins.first->getKey()));
+          IndexedInstrProf::ComputeHash(FuncName), Ins.first->getKey()));
   }
   /// Map a function address to its name's MD5 hash. This interface
   /// is only used by the raw profiler reader.
@@ -391,13 +483,13 @@ public:
   inline StringRef getNameData() const { return Data; }
 };
 
-std::error_code InstrProfSymtab::create(StringRef D, uint64_t BaseAddr) {
+Error InstrProfSymtab::create(StringRef D, uint64_t BaseAddr) {
   Data = D;
   Address = BaseAddr;
-  return std::error_code();
+  return Error::success();
 }
 
-std::error_code InstrProfSymtab::create(StringRef NameStrings) {
+Error InstrProfSymtab::create(StringRef NameStrings) {
   return readPGOFuncNameStrings(NameStrings, *this);
 }
 
@@ -468,19 +560,21 @@ struct InstrProfValueSiteRecord {
 
   /// Merge data from another InstrProfValueSiteRecord
   /// Optionally scale merged counts by \p Weight.
-  instrprof_error merge(InstrProfValueSiteRecord &Input, uint64_t Weight = 1);
+  void merge(SoftInstrProfErrors &SIPE, InstrProfValueSiteRecord &Input,
+             uint64_t Weight = 1);
   /// Scale up value profile data counts.
-  instrprof_error scale(uint64_t Weight);
+  void scale(SoftInstrProfErrors &SIPE, uint64_t Weight);
 };
 
 /// Profiling information for a single function.
 struct InstrProfRecord {
-  InstrProfRecord() {}
+  InstrProfRecord() : SIPE() {}
   InstrProfRecord(StringRef Name, uint64_t Hash, std::vector<uint64_t> Counts)
-      : Name(Name), Hash(Hash), Counts(std::move(Counts)) {}
+      : Name(Name), Hash(Hash), Counts(std::move(Counts)), SIPE() {}
   StringRef Name;
   uint64_t Hash;
   std::vector<uint64_t> Counts;
+  SoftInstrProfErrors SIPE;
 
   typedef std::vector<std::pair<uint64_t, uint64_t>> ValueMapType;
 
@@ -515,11 +609,11 @@ struct InstrProfRecord {
 
   /// Merge the counts in \p Other into this one.
   /// Optionally scale merged counts by \p Weight.
-  instrprof_error merge(InstrProfRecord &Other, uint64_t Weight = 1);
+  void merge(InstrProfRecord &Other, uint64_t Weight = 1);
 
   /// Scale up profile counts (including value profile data) by
   /// \p Weight.
-  instrprof_error scale(uint64_t Weight);
+  void scale(uint64_t Weight);
 
   /// Sort value profile data (per site) by count.
   void sortValueData() {
@@ -535,6 +629,9 @@ struct InstrProfRecord {
     for (uint32_t Kind = IPVK_First; Kind <= IPVK_Last; ++Kind)
       getValueSitesForKind(Kind).clear();
   }
+
+  /// Get the error contained within the record's soft error counter.
+  Error takeError() { return SIPE.takeError(); }
 
 private:
   std::vector<InstrProfValueSiteRecord> IndirectCallSites;
@@ -562,10 +659,10 @@ private:
 
   // Merge Value Profile data from Src record to this record for ValueKind.
   // Scale merged value counts by \p Weight.
-  instrprof_error mergeValueProfData(uint32_t ValueKind, InstrProfRecord &Src,
-                                     uint64_t Weight);
+  void mergeValueProfData(uint32_t ValueKind, InstrProfRecord &Src,
+                          uint64_t Weight);
   // Scale up value profile data count.
-  instrprof_error scaleValueProfData(uint32_t ValueKind, uint64_t Weight);
+  void scaleValueProfData(uint32_t ValueKind, uint64_t Weight);
 };
 
 uint32_t InstrProfRecord::getNumValueKinds() const {
@@ -650,102 +747,6 @@ void InstrProfValueSiteRecord::sortByCount() {
     ValueData.resize(max_s);
 }
 
-/*
-* Initialize the record for runtime value profile data.
-* Return 0 if the initialization is successful, otherwise
-* return 1.
-*/
-int initializeValueProfRuntimeRecord(ValueProfRuntimeRecord *RuntimeRecord,
-                                     const uint16_t *NumValueSites,
-                                     ValueProfNode **Nodes);
-
-/* Release memory allocated for the runtime record.  */
-void finalizeValueProfRuntimeRecord(ValueProfRuntimeRecord *RuntimeRecord);
-
-/* Return the size of ValueProfData structure that can be used to store
-   the value profile data collected at runtime. */
-uint32_t getValueProfDataSizeRT(const ValueProfRuntimeRecord *Record);
-
-/* Return a ValueProfData instance that stores the data collected at runtime. */
-ValueProfData *
-serializeValueProfDataFromRT(const ValueProfRuntimeRecord *Record,
-                             ValueProfData *Dst);
-
-namespace IndexedInstrProf {
-struct Summary;
-}
-
-///// Profile summary computation ////
-// The 'show' command displays richer summary of the profile data. The profile
-// summary is one or more (Cutoff, MinBlockCount, NumBlocks) triplets. Given a
-// target execution count percentile, we compute the minimum number of blocks
-// needed to reach this target and the minimum execution count of these blocks.
-struct ProfileSummaryEntry {
-  uint32_t Cutoff;        ///< The required percentile of total execution count.
-  uint64_t MinBlockCount; ///< The minimum execution count for this percentile.
-  uint64_t NumBlocks;     ///< Number of blocks >= the minumum execution count.
-  ProfileSummaryEntry(uint32_t TheCutoff, uint64_t TheMinBlockCount,
-                      uint64_t TheNumBlocks)
-      : Cutoff(TheCutoff), MinBlockCount(TheMinBlockCount),
-        NumBlocks(TheNumBlocks) {}
-};
-
-class ProfileSummary {
-  // We keep track of the number of times a count appears in the profile and
-  // keep the map sorted in the descending order of counts.
-  std::map<uint64_t, uint32_t, std::greater<uint64_t>> CountFrequencies;
-  std::vector<ProfileSummaryEntry> DetailedSummary;
-  std::vector<uint32_t> DetailedSummaryCutoffs;
-  // Sum of all counts.
-  uint64_t TotalCount;
-  uint64_t MaxBlockCount, MaxInternalBlockCount, MaxFunctionCount;
-  uint32_t NumBlocks, NumFunctions;
-  inline void addCount(uint64_t Count, bool IsEntry);
-
-public:
-  static const int Scale = 1000000;
-  ProfileSummary(std::vector<uint32_t> Cutoffs)
-      : DetailedSummaryCutoffs(Cutoffs), TotalCount(0), MaxBlockCount(0),
-        MaxInternalBlockCount(0), MaxFunctionCount(0), NumBlocks(0),
-        NumFunctions(0) {}
-  ProfileSummary(const IndexedInstrProf::Summary &S);
-  inline void addRecord(const InstrProfRecord &);
-  inline std::vector<ProfileSummaryEntry> &getDetailedSummary();
-  void computeDetailedSummary();
-  uint32_t getNumBlocks() { return NumBlocks; }
-  uint64_t getTotalCount() { return TotalCount; }
-  uint32_t getNumFunctions() { return NumFunctions; }
-  uint64_t getMaxFunctionCount() { return MaxFunctionCount; }
-  uint64_t getMaxBlockCount() { return MaxBlockCount; }
-  uint64_t getMaxInternalBlockCount() { return MaxInternalBlockCount; }
-};
-
-// This is called when a count is seen in the profile.
-void ProfileSummary::addCount(uint64_t Count, bool IsEntry) {
-  TotalCount += Count;
-  if (Count > MaxBlockCount)
-    MaxBlockCount = Count;
-  if (!IsEntry && Count > MaxInternalBlockCount)
-    MaxInternalBlockCount = Count;
-  NumBlocks++;
-  CountFrequencies[Count]++;
-}
-
-void ProfileSummary::addRecord(const InstrProfRecord &R) {
-  NumFunctions++;
-  if (R.Counts[0] > MaxFunctionCount)
-    MaxFunctionCount = R.Counts[0];
-
-  for (size_t I = 0, E = R.Counts.size(); I < E; ++I)
-    addCount(R.Counts[I], (I == 0));
-}
-
-std::vector<ProfileSummaryEntry> &ProfileSummary::getDetailedSummary() {
-  if (!DetailedSummaryCutoffs.empty() && DetailedSummary.empty())
-    computeDetailedSummary();
-  return DetailedSummary;
-}
-
 namespace IndexedInstrProf {
 
 enum class HashT : uint32_t {
@@ -800,14 +801,6 @@ struct Header {
   uint64_t HashOffset;
 };
 
-static const uint32_t SummaryCutoffs[] = {
-    10000,  /*  1% */
-    100000, /* 10% */
-    200000, 300000, 400000, 500000, 600000, 500000, 600000, 700000,
-    800000, 900000, 950000, 990000, 999000, 999900, 999990, 999999};
-static const uint32_t NumSummaryCutoffs =
-    sizeof(SummaryCutoffs) / sizeof(*SummaryCutoffs);
-
 // Profile summary data recorded in the profile data file in indexed
 // format. It is introduced in version 4. The summary data follows
 // right after the profile file header.
@@ -819,8 +812,9 @@ struct Summary {
         MinBlockCount;  ///< The minimum execution count for this percentile.
     uint64_t NumBlocks; ///< Number of blocks >= the minumum execution count.
   };
-  // New field kind to existing enum value mapping should remain unchanged
-  // when new kind is added in the future.
+  // The field kind enumerator to assigned value mapping should remain
+  // unchanged  when a new kind is added or an old kind gets deleted in
+  // the future.
   enum SummaryFieldKind {
     /// The total number of functions instrumented.
     TotalNumFunctions = 0,
@@ -875,8 +869,8 @@ struct Summary {
   void setEntry(uint32_t I, const ProfileSummaryEntry &E) {
     Entry &ER = getCutoffEntryBase()[I];
     ER.Cutoff = E.Cutoff;
-    ER.MinBlockCount = E.MinBlockCount;
-    ER.NumBlocks = E.NumBlocks;
+    ER.MinBlockCount = E.MinCount;
+    ER.NumBlocks = E.NumCounts;
   }
 
   Summary(uint32_t Size) { memset(this, 0, Size); }
@@ -898,6 +892,8 @@ namespace RawInstrProf {
 // struct has more fields to describe value profile information.
 // Version 3: Compressed name section support. Function PGO name reference
 // from control data struct is changed from raw pointer to Name's MD5 value.
+// Version 4: ValueDataBegin and ValueDataSizes fields are removed from the
+// raw header.
 const uint64_t Version = INSTR_PROF_RAW_VERSION;
 
 template <class IntPtrT> inline uint64_t getMagic();
@@ -928,13 +924,8 @@ struct Header {
 #include "llvm/ProfileData/InstrProfData.inc"
 };
 
-}  // end namespace RawInstrProf
+} // end namespace RawInstrProf
 
 } // end namespace llvm
 
-namespace std {
-template <>
-struct is_error_code_enum<llvm::instrprof_error> : std::true_type {};
-}
-
-#endif // LLVM_PROFILEDATA_INSTRPROF_H_
+#endif // LLVM_PROFILEDATA_INSTRPROF_H

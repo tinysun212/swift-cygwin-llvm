@@ -1,4 +1,5 @@
-# RUN: llc -mtriple=aarch64-linux-gnu -run-pass peephole-opts %s 2>&1 | FileCheck %s
+# RUN: rm -f %S/arm64-regress-opt-cmp.s
+# RUN: llc -mtriple=aarch64-linux-gnu -run-pass peephole-opt -o - %s 2>&1 | FileCheck %s
 # CHECK: %1 = ANDWri {{.*}}
 # CHECK-NEXT: %wzr = SUBSWri {{.*}}
 --- |

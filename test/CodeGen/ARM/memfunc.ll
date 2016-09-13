@@ -5,6 +5,8 @@
 ; RUN: llc < %s -mtriple=arm-none-androideabi -disable-post-ra -o - | FileCheck %s --check-prefix=CHECK-EABI --check-prefix=CHECK
 ; RUN: llc < %s -mtriple=arm-none-gnueabi -disable-post-ra -o - | FileCheck %s --check-prefix=CHECK-GNUEABI --check-prefix=CHECK
 ; RUN: llc < %s -mtriple=arm-none-gnueabihf -disable-post-ra -o - | FileCheck %s --check-prefix=CHECK-GNUEABI --check-prefix=CHECK
+; RUN: llc < %s -mtriple=arm-none-musleabi -disable-post-ra -o - | FileCheck %s --check-prefix=CHECK-GNUEABI --check-prefix=CHECK
+; RUN: llc < %s -mtriple=arm-none-musleabihf -disable-post-ra -o - | FileCheck %s --check-prefix=CHECK-GNUEABI --check-prefix=CHECK
 
 define void @f1(i8* %dest, i8* %src) {
 entry:
@@ -402,26 +404,26 @@ entry:
 }
 
 ; CHECK: {{\.data|\.section.+data}}
-; CHECK-NOT: .align
+; CHECK-NOT: .p2align
 ; CHECK: arr1:
-; CHECK-IOS: .align 3
-; CHECK-DARWIN: .align 2
-; CHECK-EABI-NOT: .align
-; CHECK-GNUEABI-NOT: .align
+; CHECK-IOS: .p2align 3
+; CHECK-DARWIN: .p2align 2
+; CHECK-EABI-NOT: .p2align
+; CHECK-GNUEABI-NOT: .p2align
 ; CHECK: arr2:
 ; CHECK: {{\.section.+foo,bar}}
-; CHECK-NOT: .align
+; CHECK-NOT: .p2align
 ; CHECK: arr3:
-; CHECK-NOT: .align
+; CHECK-NOT: .p2align
 ; CHECK: arr4:
 ; CHECK: {{\.data|\.section.+data}}
-; CHECK-NOT: .align
+; CHECK-NOT: .p2align
 ; CHECK: arr5:
-; CHECK-NOT: .align
+; CHECK-NOT: .p2align
 ; CHECK: arr6:
-; CHECK: .align 4
+; CHECK: .p2align 4
 ; CHECK: arr8:
-; CHECK: .align 4
+; CHECK: .p2align 4
 ; CHECK: arr9:
 
 ; CHECK-NOT: arr7:

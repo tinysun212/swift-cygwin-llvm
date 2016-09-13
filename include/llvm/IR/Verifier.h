@@ -21,9 +21,7 @@
 #ifndef LLVM_IR_VERIFIER_H
 #define LLVM_IR_VERIFIER_H
 
-#include "llvm/ADT/StringRef.h"
 #include "llvm/IR/PassManager.h"
-#include <string>
 
 namespace llvm {
 
@@ -31,7 +29,6 @@ class Function;
 class FunctionPass;
 class ModulePass;
 class Module;
-class PreservedAnalyses;
 class raw_ostream;
 
 /// \brief Check a function for errors, useful for use when debugging a
@@ -59,17 +56,17 @@ FunctionPass *createVerifierPass(bool FatalErrors = true);
 
 /// Check a module for errors, and report separate error states for IR
 /// and debug info errors.
-class VerifierAnalysis {
+class VerifierAnalysis : public AnalysisInfoMixin<VerifierAnalysis> {
+  friend AnalysisInfoMixin<VerifierAnalysis>;
   static char PassID;
 
 public:
   struct Result {
     bool IRBroken, DebugInfoBroken;
   };
-  static StringRef name() { return "VerifierAnalysis"; }  
   static void *ID() { return (void *)&PassID; }
-  Result run(Module &M);
-  Result run(Function &F);
+  Result run(Module &M, ModuleAnalysisManager &);
+  Result run(Function &F, FunctionAnalysisManager &);
 };
 
 /// Check a module for errors, but report debug info errors separately.
@@ -87,15 +84,14 @@ bool verifyModule(bool &BrokenDebugInfo, const Module &M, raw_ostream *OS);
 ///
 /// Note that this creates a pass suitable for the legacy pass manager. It has
 /// nothing to do with \c VerifierPass.
-class VerifierPass {
+class VerifierPass : public PassInfoMixin<VerifierPass> {
   bool FatalErrors;
 
 public:
   explicit VerifierPass(bool FatalErrors = true) : FatalErrors(FatalErrors) {}
 
-  static StringRef name() { return "VerifierPass"; }
-  PreservedAnalyses run(Module &M, ModuleAnalysisManager *AM);
-  PreservedAnalyses run(Function &F, FunctionAnalysisManager *AM);
+  PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM);
+  PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM);
 };
 
 

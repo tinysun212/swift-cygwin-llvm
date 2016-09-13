@@ -18,7 +18,6 @@
 ///
 //===----------------------------------------------------------------------===//
 
-#include "llvm/ADT/Statistic.h"
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SparseBitVector.h"
@@ -28,15 +27,15 @@
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/Passes.h"
-#include "llvm/Support/CommandLine.h"
+#include "llvm/IR/DebugInfo.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetInstrInfo.h"
 #include "llvm/Target/TargetLowering.h"
 #include "llvm/Target/TargetRegisterInfo.h"
 #include "llvm/Target/TargetSubtargetInfo.h"
-#include <queue>
 #include <list>
+#include <queue>
 
 using namespace llvm;
 
@@ -216,6 +215,11 @@ public:
   /// information we preserve.
   void getAnalysisUsage(AnalysisUsage &AU) const override;
 
+  MachineFunctionProperties getRequiredProperties() const override {
+    return MachineFunctionProperties().set(
+        MachineFunctionProperties::Property::AllVRegsAllocated);
+  }
+
   /// Print to ostream with a message.
   void printVarLocInMBB(const MachineFunction &MF, const VarLocInMBB &V,
                         const VarLocMap &VarLocIDs, const char *msg,
@@ -243,6 +247,7 @@ LiveDebugValues::LiveDebugValues() : MachineFunctionPass(ID) {
 /// Tell the pass manager which passes we depend on and what information we
 /// preserve.
 void LiveDebugValues::getAnalysisUsage(AnalysisUsage &AU) const {
+  AU.setPreservesCFG();
   MachineFunctionPass::getAnalysisUsage(AU);
 }
 
@@ -482,8 +487,7 @@ bool LiveDebugValues::ExtendRanges(MachineFunction &MF) {
         if (OLChanged) {
           OLChanged = false;
           for (auto s : MBB->successors())
-            if (!OnPending.count(s)) {
-              OnPending.insert(s);
+            if (OnPending.insert(s).second) {
               Pending.push(BBToOrder[s]);
             }
         }

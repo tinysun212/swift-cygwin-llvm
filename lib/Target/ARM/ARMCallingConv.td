@@ -26,7 +26,7 @@ def CC_ARM_APCS : CallingConv<[
   // Pass SwiftSelf in a callee saved register.
   CCIfSwiftSelf<CCIfType<[i32], CCAssignToReg<[R10]>>>,
 
-  // An SwiftError is passed in R6.
+  // A SwiftError is passed in R6.
   CCIfSwiftError<CCIfType<[i32], CCAssignToReg<[R6]>>>,
 
   // Handle all vector types as either f64 or v2f64.
@@ -166,7 +166,7 @@ def CC_ARM_AAPCS : CallingConv<[
   // Pass SwiftSelf in a callee saved register.
   CCIfSwiftSelf<CCIfType<[i32], CCAssignToReg<[R10]>>>,
 
-  // An SwiftError is passed in R6.
+  // A SwiftError is passed in R6.
   CCIfSwiftError<CCIfType<[i32], CCAssignToReg<[R6]>>>,
 
   CCIfType<[f64, v2f64], CCCustom<"CC_ARM_AAPCS_Custom_f64">>,
@@ -206,7 +206,7 @@ def CC_ARM_AAPCS_VFP : CallingConv<[
   // Pass SwiftSelf in a callee saved register.
   CCIfSwiftSelf<CCIfType<[i32], CCAssignToReg<[R10]>>>,
 
-  // An SwiftError is passed in R6.
+  // A SwiftError is passed in R6.
   CCIfSwiftError<CCIfType<[i32], CCAssignToReg<[R6]>>>,
 
   // HFAs are passed in a contiguous block of registers, or on the stack

@@ -51,6 +51,11 @@ namespace {
 
     bool runOnMachineFunction(MachineFunction &Fn) override;
 
+    MachineFunctionProperties getRequiredProperties() const override {
+      return MachineFunctionProperties().set(
+          MachineFunctionProperties::Property::AllVRegsAllocated);
+    }
+
     const char *getPassName() const override {
       return "ARM pseudo instruction expansion pass";
     }
@@ -652,6 +657,8 @@ static bool IsAnAddressOperand(const MachineOperand &MO) {
     return true;
   case MachineOperand::MO_CFIIndex:
     return false;
+  case MachineOperand::MO_IntrinsicID:
+    llvm_unreachable("should not exist post-isel");
   }
   llvm_unreachable("unhandled machine operand type");
 }
@@ -661,7 +668,7 @@ void ARMExpandPseudo::ExpandMOV32BitImm(MachineBasicBlock &MBB,
   MachineInstr &MI = *MBBI;
   unsigned Opcode = MI.getOpcode();
   unsigned PredReg = 0;
-  ARMCC::CondCodes Pred = getInstrPredicate(&MI, PredReg);
+  ARMCC::CondCodes Pred = getInstrPredicate(MI, PredReg);
   unsigned DstReg = MI.getOperand(0).getReg();
   bool DstIsDead = MI.getOperand(0).isDead();
   bool isCC = Opcode == ARM::MOVCCi32imm || Opcode == ARM::t2MOVCCi32imm;
@@ -770,7 +777,7 @@ bool ARMExpandPseudo::ExpandCMP_SWAP(MachineBasicBlock &MBB,
   MachineOperand &New = MI.getOperand(4);
 
   LivePhysRegs LiveRegs(&TII->getRegisterInfo());
-  LiveRegs.addLiveOuts(&MBB, /*AddPristinesAndCSRs=*/true);
+  LiveRegs.addLiveOuts(MBB);
   for (auto I = std::prev(MBB.end()); I != MBBI; --I)
     LiveRegs.stepBackward(*I);
 
@@ -892,7 +899,7 @@ bool ARMExpandPseudo::ExpandCMP_SWAP_64(MachineBasicBlock &MBB,
   unsigned DesiredHi = TRI->getSubReg(Desired.getReg(), ARM::gsub_1);
 
   LivePhysRegs LiveRegs(&TII->getRegisterInfo());
-  LiveRegs.addLiveOuts(&MBB, /*AddPristinesAndCSRs=*/true);
+  LiveRegs.addLiveOuts(MBB);
   for (auto I = std::prev(MBB.end()); I != MBBI; --I)
     LiveRegs.stepBackward(*I);
 
@@ -1028,7 +1035,7 @@ bool ARMExpandPseudo::ExpandMI(MachineBasicBlock &MBB,
             .addReg(JumpTarget.getReg(), RegState::Kill);
       }
 
-      MachineInstr *NewMI = std::prev(MBBI);
+      auto NewMI = std::prev(MBBI);
       for (unsigned i = 1, e = MBBI->getNumOperands(); i != e; ++i)
         NewMI->addOperand(MBBI->getOperand(i));
 
@@ -1173,8 +1180,8 @@ bool ARMExpandPseudo::ExpandMI(MachineBasicBlock &MBB,
         }
         // If there's dynamic realignment, adjust for it.
         if (RI.needsStackRealignment(MF)) {
-          MachineFrameInfo  *MFI = MF.getFrameInfo();
-          unsigned MaxAlign = MFI->getMaxAlignment();
+          MachineFrameInfo &MFI = MF.getFrameInfo();
+          unsigned MaxAlign = MFI.getMaxAlignment();
           assert (!AFI->isThumb1OnlyFunction());
           // Emit bic r6, r6, MaxAlign
           assert(MaxAlign <= 256 && "The BIC instruction cannot encode "

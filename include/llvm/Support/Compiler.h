@@ -17,6 +17,10 @@
 
 #include "llvm/Config/llvm-config.h"
 
+#if defined(_MSC_VER)
+#include <sal.h>
+#endif
+
 #ifndef __has_feature
 # define __has_feature(x) 0
 #endif
@@ -27,6 +31,10 @@
 
 #ifndef __has_attribute
 # define __has_attribute(x) 0
+#endif
+
+#ifndef __has_cpp_attribute
+# define __has_cpp_attribute(x) 0
 #endif
 
 #ifndef __has_builtin
@@ -92,7 +100,7 @@
 #define LLVM_LVALUE_FUNCTION
 #endif
 
-#if __has_feature(cxx_constexpr) || defined(__GXX_EXPERIMENTAL_CXX0X__)
+#if __has_feature(cxx_constexpr) || defined(__GXX_EXPERIMENTAL_CXX0X__) || LLVM_MSC_PREREQ(1900)
 # define LLVM_CONSTEXPR constexpr
 #else
 # define LLVM_CONSTEXPR
@@ -124,6 +132,8 @@
 
 #if __has_attribute(warn_unused_result) || LLVM_GNUC_PREREQ(3, 4, 0)
 #define LLVM_ATTRIBUTE_UNUSED_RESULT __attribute__((__warn_unused_result__))
+#elif defined(_MSC_VER)
+#define LLVM_ATTRIBUTE_UNUSED_RESULT _Check_return_
 #else
 #define LLVM_ATTRIBUTE_UNUSED_RESULT
 #endif
@@ -206,6 +216,8 @@
 
 #if __has_attribute(returns_nonnull) || LLVM_GNUC_PREREQ(4, 9, 0)
 #define LLVM_ATTRIBUTE_RETURNS_NONNULL __attribute__((returns_nonnull))
+#elif defined(_MSC_VER)
+#define LLVM_ATTRIBUTE_RETURNS_NONNULL _Ret_notnull_
 #else
 #define LLVM_ATTRIBUTE_RETURNS_NONNULL
 #endif
@@ -218,6 +230,19 @@
 #define LLVM_ATTRIBUTE_RETURNS_NOALIAS __declspec(restrict)
 #else
 #define LLVM_ATTRIBUTE_RETURNS_NOALIAS
+#endif
+
+/// LLVM_FALLTHROUGH - Mark fallthrough cases in switch statements.
+#if __has_cpp_attribute(fallthrough)
+#define LLVM_FALLTHROUGH [[fallthrough]]
+#elif !__cplusplus
+// Workaround for llvm.org/PR23435, since clang 3.6 and below emit a spurious
+// error when __has_cpp_attribute is given a scoped attribute in C mode.
+#define LLVM_FALLTHROUGH
+#elif __has_cpp_attribute(clang::fallthrough)
+#define LLVM_FALLTHROUGH [[clang::fallthrough]]
+#else
+#define LLVM_FALLTHROUGH
 #endif
 
 /// LLVM_EXTENSION - Support compilers where we have a keyword to suppress
@@ -397,12 +422,16 @@
 // Thread Sanitizer is a tool that finds races in code.
 // See http://code.google.com/p/data-race-test/wiki/DynamicAnnotations .
 // tsan detects these exact functions by name.
+#ifdef __cplusplus
 extern "C" {
+#endif
 void AnnotateHappensAfter(const char *file, int line, const volatile void *cv);
 void AnnotateHappensBefore(const char *file, int line, const volatile void *cv);
 void AnnotateIgnoreWritesBegin(const char *file, int line);
 void AnnotateIgnoreWritesEnd(const char *file, int line);
+#ifdef __cplusplus
 }
+#endif
 
 // This marker is used to define a happens-before arc. The race detector will
 // infer an arc from the begin to the end when they share the same pointer
@@ -439,6 +468,19 @@ void AnnotateIgnoreWritesEnd(const char *file, int line);
 #define LLVM_DUMP_METHOD LLVM_ATTRIBUTE_NOINLINE LLVM_ATTRIBUTE_USED
 #else
 #define LLVM_DUMP_METHOD LLVM_ATTRIBUTE_NOINLINE
+#endif
+
+/// \macro LLVM_PRETTY_FUNCTION
+/// \brief Gets a user-friendly looking function signature for the current scope
+/// using the best available method on each platform.  The exact format of the
+/// resulting string is implementation specific and non-portable, so this should
+/// only be used, for example, for logging or diagnostics.
+#if defined(_MSC_VER)
+#define LLVM_PRETTY_FUNCTION __FUNCSIG__
+#elif defined(__GNUC__) || defined(__clang__)
+#define LLVM_PRETTY_FUNCTION __PRETTY_FUNCTION__
+#else 
+#define LLVM_PRETTY_FUNCTION __func__
 #endif
 
 /// \macro LLVM_THREAD_LOCAL

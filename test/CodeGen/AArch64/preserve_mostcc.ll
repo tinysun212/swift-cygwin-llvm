@@ -10,7 +10,8 @@ entry:
 ;CHECK-LABEL: preserve_mostcc1
 ;CHECK-NOT:   stp
 ;CHECK-NOT:   str
-;CHECK:       stp     x14, x13,
+;CHECK:       str     x15
+;CHECK-NEXT:  stp     x14, x13,
 ;CHECK-NEXT:  stp     x12, x11,
 ;CHECK-NEXT:  stp     x10, x9,
 ;CHECK:       bl      _standard_cc_func
@@ -18,6 +19,7 @@ entry:
 ;CHECK:       ldp     x10, x9,
 ;CHECK-NEXT:  ldp     x12, x11,
 ;CHECK-NEXT:  ldp     x14, x13,
+;CHECK-NEXT:  ldr     x15
   ret void
 }
 

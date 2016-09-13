@@ -76,13 +76,14 @@ namespace llvm {
                                                     LLVMContext &Context);
 
   /// Check if the given bitcode buffer contains a summary block.
-  bool hasGlobalValueSummary(MemoryBufferRef Buffer,
-                             DiagnosticHandlerFunction DiagnosticHandler);
+  bool
+  hasGlobalValueSummary(MemoryBufferRef Buffer,
+                        const DiagnosticHandlerFunction &DiagnosticHandler);
 
   /// Parse the specified bitcode buffer, returning the module summary index.
   ErrorOr<std::unique_ptr<ModuleSummaryIndex>>
   getModuleSummaryIndex(MemoryBufferRef Buffer,
-                        DiagnosticHandlerFunction DiagnosticHandler);
+                        const DiagnosticHandlerFunction &DiagnosticHandler);
 
   /// \brief Write the specified module to the specified raw output stream.
   ///
@@ -93,8 +94,11 @@ namespace llvm {
   /// Value in \c M.  These will be reconstructed exactly when \a M is
   /// deserialized.
   ///
-  /// If \c EmitSummaryIndex, emit the module's summary index (currently
-  /// for use in ThinLTO optimization).
+  /// If \c Index is supplied, the bitcode will contain the summary index
+  /// (currently for use in ThinLTO optimization).
+  ///
+  /// \p GenerateHash enables hashing the Module and including the hash in the
+  /// bitcode (currently for use in ThinLTO incremental build).
   void WriteBitcodeToFile(const Module *M, raw_ostream &Out,
                           bool ShouldPreserveUseListOrder = false,
                           const ModuleSummaryIndex *Index = nullptr,
@@ -102,8 +106,12 @@ namespace llvm {
 
   /// Write the specified module summary index to the given raw output stream,
   /// where it will be written in a new bitcode block. This is used when
-  /// writing the combined index file for ThinLTO.
-  void WriteIndexToFile(const ModuleSummaryIndex &Index, raw_ostream &Out);
+  /// writing the combined index file for ThinLTO. When writing a subset of the
+  /// index for a distributed backend, provide the \p ModuleToSummariesForIndex
+  /// map.
+  void WriteIndexToFile(const ModuleSummaryIndex &Index, raw_ostream &Out,
+                        std::map<std::string, GVSummaryMapTy>
+                            *ModuleToSummariesForIndex = nullptr);
 
   /// isBitcodeWrapper - Return true if the given bytes are the magic bytes
   /// for an LLVM IR bitcode wrapper.
@@ -162,7 +170,7 @@ namespace llvm {
                                        const unsigned char *&BufEnd,
                                        bool VerifyBufferSize) {
     // Must contain the offset and size field!
-    if (BufEnd - BufPtr < BWH_SizeField + 4)
+    if (unsigned(BufEnd - BufPtr) < BWH_SizeField + 4)
       return true;
 
     unsigned Offset = support::endian::read32le(&BufPtr[BWH_OffsetField]);

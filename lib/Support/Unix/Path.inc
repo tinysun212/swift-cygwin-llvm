@@ -28,6 +28,9 @@
 #if HAVE_FCNTL_H
 #include <fcntl.h>
 #endif
+#ifdef HAVE_UNISTD_H
+#include <unistd.h>
+#endif
 #ifdef HAVE_SYS_MMAN_H
 #include <sys/mman.h>
 #endif
@@ -50,6 +53,7 @@
 
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
+#include <sys/attr.h>
 #endif
 
 // Both stdio.h and cstdio are included via different pathes and
@@ -89,7 +93,8 @@ namespace sys  {
 namespace fs {
 #if defined(__FreeBSD__) || defined (__NetBSD__) || defined(__Bitrig__) || \
     defined(__OpenBSD__) || defined(__minix) || defined(__FreeBSD_kernel__) || \
-    defined(__linux__) || defined(__CYGWIN__) || defined(__DragonFly__)
+    defined(__linux__) || defined(__CYGWIN__) || defined(__DragonFly__) || \
+    defined(_AIX)
 static int
 test_dir(char ret[PATH_MAX], const char *dir, const char *bin)
 {
@@ -160,7 +165,7 @@ std::string getMainExecutable(const char *argv0, void *MainAddr) {
   }
 #elif defined(__FreeBSD__) || defined (__NetBSD__) || defined(__Bitrig__) || \
       defined(__OpenBSD__) || defined(__minix) || defined(__DragonFly__) || \
-      defined(__FreeBSD_kernel__)
+      defined(__FreeBSD_kernel__) || defined(_AIX)
   char exe_path[PATH_MAX];
 
   if (getprogpath(exe_path, argv0) != NULL)
@@ -328,8 +333,17 @@ std::error_code rename(const Twine &from, const Twine &to) {
 }
 
 std::error_code resize_file(int FD, uint64_t Size) {
+#if defined(HAVE_POSIX_FALLOCATE)
+  // If we have posix_fallocate use it. Unlike ftruncate it always allocates
+  // space, so we get an error if the disk is full.
+  if (int Err = ::posix_fallocate(FD, 0, Size))
+    return std::error_code(Err, std::generic_category());
+#else
+  // Use ftruncate as a fallback. It may or may not allocate space. At least on
+  // OS X with HFS+ it does.
   if (::ftruncate(FD, Size) == -1)
     return std::error_code(errno, std::generic_category());
+#endif
 
   return std::error_code();
 }
@@ -547,13 +561,47 @@ std::error_code detail::directory_iterator_increment(detail::DirIterState &it) {
   return std::error_code();
 }
 
-std::error_code openFileForRead(const Twine &Name, int &ResultFD) {
+#if !defined(F_GETPATH)
+static bool hasProcSelfFD() {
+  // If we have a /proc filesystem mounted, we can quickly establish the
+  // real name of the file with readlink
+  static const bool Result = (::access("/proc/self/fd", R_OK) == 0);
+  return Result;
+}
+#endif
+
+std::error_code openFileForRead(const Twine &Name, int &ResultFD,
+                                SmallVectorImpl<char> *RealPath) {
   SmallString<128> Storage;
   StringRef P = Name.toNullTerminatedStringRef(Storage);
   while ((ResultFD = open(P.begin(), O_RDONLY)) < 0) {
     if (errno != EINTR)
       return std::error_code(errno, std::generic_category());
   }
+  // Attempt to get the real name of the file, if the user asked
+  if(!RealPath)
+    return std::error_code();
+  RealPath->clear();
+#if defined(F_GETPATH)
+  // When F_GETPATH is availble, it is the quickest way to get
+  // the real path name.
+  char Buffer[MAXPATHLEN];
+  if (::fcntl(ResultFD, F_GETPATH, Buffer) != -1)
+    RealPath->append(Buffer, Buffer + strlen(Buffer));
+#else
+  char Buffer[PATH_MAX];
+  if (hasProcSelfFD()) {
+    char ProcPath[64];
+    snprintf(ProcPath, sizeof(ProcPath), "/proc/self/fd/%d", ResultFD);
+    ssize_t CharCount = ::readlink(ProcPath, Buffer, sizeof(Buffer));
+    if (CharCount > 0)
+      RealPath->append(Buffer, Buffer + CharCount);
+  } else {
+    // Use ::realpath to get the real path name
+    if (::realpath(P.begin(), Buffer) != nullptr)
+      RealPath->append(Buffer, Buffer + strlen(Buffer));
+  }
+#endif
   return std::error_code();
 }
 
@@ -584,6 +632,53 @@ std::error_code openFileForWrite(const Twine &Name, int &ResultFD,
     if (errno != EINTR)
       return std::error_code(errno, std::generic_category());
   }
+  return std::error_code();
+}
+
+std::error_code getPathFromOpenFD(int FD, SmallVectorImpl<char> &ResultPath) {
+  if (FD < 0)
+    return make_error_code(errc::bad_file_descriptor);
+
+#if defined(F_GETPATH)
+  // When F_GETPATH is availble, it is the quickest way to get
+  // the path from a file descriptor.
+  ResultPath.reserve(MAXPATHLEN);
+  if (::fcntl(FD, F_GETPATH, ResultPath.begin()) == -1)
+    return std::error_code(errno, std::generic_category());
+
+  ResultPath.set_size(strlen(ResultPath.begin()));
+#else
+  // If we have a /proc filesystem mounted, we can quickly establish the
+  // real name of the file with readlink. Otherwise, we don't know how to
+  // get the filename from a file descriptor. Give up.
+  if (!fs::hasProcSelfFD())
+    return make_error_code(errc::function_not_supported);
+
+  ResultPath.reserve(PATH_MAX);
+  char ProcPath[64];
+  snprintf(ProcPath, sizeof(ProcPath), "/proc/self/fd/%d", FD);
+  ssize_t CharCount = ::readlink(ProcPath, ResultPath.begin(), ResultPath.capacity());
+  if (CharCount < 0)
+      return std::error_code(errno, std::generic_category());
+
+  // Was the filename truncated?
+  if (static_cast<size_t>(CharCount) == ResultPath.capacity()) {
+    // Use lstat to get the size of the filename
+    struct stat sb;
+    if (::lstat(ProcPath, &sb) < 0)
+      return std::error_code(errno, std::generic_category());
+
+    ResultPath.reserve(sb.st_size + 1);
+    CharCount = ::readlink(ProcPath, ResultPath.begin(), ResultPath.capacity());
+    if (CharCount < 0)
+      return std::error_code(errno, std::generic_category());
+
+    // Test for race condition: did the link size change?
+    if (CharCount > sb.st_size)
+      return std::error_code(ENAMETOOLONG, std::generic_category());
+  }
+  ResultPath.set_size(static_cast<size_t>(CharCount));
+#endif
   return std::error_code();
 }
 
@@ -627,12 +722,12 @@ static bool getDarwinConfDir(bool TempDir, SmallVectorImpl<char> &Result) {
 }
 
 static bool getUserCacheDir(SmallVectorImpl<char> &Result) {
-  // First try using XDS_CACHE_HOME env variable,
+  // First try using XDG_CACHE_HOME env variable,
   // as specified in XDG Base Directory Specification at
   // http://standards.freedesktop.org/basedir-spec/basedir-spec-latest.html
-  if (const char *XdsCacheDir = std::getenv("XDS_CACHE_HOME")) {
+  if (const char *XdgCacheDir = std::getenv("XDG_CACHE_HOME")) {
     Result.clear();
-    Result.append(XdsCacheDir, XdsCacheDir + strlen(XdsCacheDir));
+    Result.append(XdgCacheDir, XdgCacheDir + strlen(XdgCacheDir));
     return true;
   }
 

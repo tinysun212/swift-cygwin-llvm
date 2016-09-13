@@ -583,11 +583,11 @@ bool TypeBasedAAResult::PathAliases(const MDNode *A, const MDNode *B) const {
   return false;
 }
 
-TypeBasedAAResult TypeBasedAA::run(Function &F, AnalysisManager<Function> *AM) {
+char TypeBasedAA::PassID;
+
+TypeBasedAAResult TypeBasedAA::run(Function &F, FunctionAnalysisManager &AM) {
   return TypeBasedAAResult();
 }
-
-char TypeBasedAA::PassID;
 
 char TypeBasedAAWrapperPass::ID = 0;
 INITIALIZE_PASS(TypeBasedAAWrapperPass, "tbaa", "Type-Based Alias Analysis",

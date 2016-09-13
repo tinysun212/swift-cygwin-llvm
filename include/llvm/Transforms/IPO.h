@@ -15,14 +15,13 @@
 #ifndef LLVM_TRANSFORMS_IPO_H
 #define LLVM_TRANSFORMS_IPO_H
 
-#include "llvm/ADT/ArrayRef.h"
-#include "llvm/ADT/StringRef.h"
-#include "llvm/ADT/StringSet.h"
-
 #include <functional>
+#include <vector>
 
 namespace llvm {
 
+struct InlineParams;
+class StringRef;
 class ModuleSummaryIndex;
 class ModulePass;
 class Pass;
@@ -105,6 +104,7 @@ Pass *createFunctionImportPass(const ModuleSummaryIndex *Index = nullptr);
 Pass *createFunctionInliningPass();
 Pass *createFunctionInliningPass(int Threshold);
 Pass *createFunctionInliningPass(unsigned OptLevel, unsigned SizeOptLevel);
+Pass *createFunctionInliningPass(InlineParams &Params);
 
 //===----------------------------------------------------------------------===//
 /// createAlwaysInlinerPass - Return a new pass object that inlines only
@@ -189,15 +189,6 @@ ModulePass *createBlockExtractorPass();
 ModulePass *createStripDeadPrototypesPass();
 
 //===----------------------------------------------------------------------===//
-/// createPostOrderFunctionAttrsPass - This pass walks SCCs of the call graph
-/// in post-order to deduce and propagate function attributes. It can discover
-/// functions that do not access memory, or only read memory, and give them the
-/// readnone/readonly attribute. It also discovers function arguments that are
-/// not captured by the function and marks them with the nocapture attribute.
-///
-Pass *createPostOrderFunctionAttrsPass();
-
-//===----------------------------------------------------------------------===//
 /// createReversePostOrderFunctionAttrsPass - This pass walks SCCs of the call
 /// graph in RPO to deduce and propagate function attributes. Currently it
 /// only handles synthesizing norecurse attributes.
@@ -225,12 +216,16 @@ ModulePass *createMetaRenamerPass();
 /// manager.
 ModulePass *createBarrierNoopPass();
 
-/// \brief This pass lowers bitset metadata and the llvm.bitset.test intrinsic
-/// to bitsets.
-ModulePass *createLowerBitSetsPass();
+/// \brief This pass lowers type metadata and the llvm.type.test intrinsic to
+/// bitsets.
+ModulePass *createLowerTypeTestsPass();
 
 /// \brief This pass export CFI checks for use by external modules.
 ModulePass *createCrossDSOCFIPass();
+
+/// \brief This pass implements whole-program devirtualization using type
+/// metadata.
+ModulePass *createWholeProgramDevirtPass();
 
 //===----------------------------------------------------------------------===//
 // SampleProfilePass - Loads sample profile data from disk and generates

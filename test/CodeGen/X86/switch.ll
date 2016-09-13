@@ -30,6 +30,47 @@ return: ret void
 ; NOOPT: jmpq
 }
 
+; Should never be lowered as a jump table because of the attribute
+define void @basic_nojumptable(i32 %x) "no-jump-tables"="true" {
+entry:
+  switch i32 %x, label %return [
+    i32 3, label %bb0
+    i32 1, label %bb1
+    i32 4, label %bb1
+    i32 5, label %bb2
+  ]
+bb0: tail call void @g(i32 0) br label %return
+bb1: tail call void @g(i32 1) br label %return
+bb2: tail call void @g(i32 1) br label %return
+return: ret void
+
+; Lowered as a jump table, both with and without optimization.
+; CHECK-LABEL: basic_nojumptable
+; CHECK-NOT: jmpq *.LJTI
+}
+
+; Should be lowered as a jump table because of the attribute
+define void @basic_nojumptable_false(i32 %x) "no-jump-tables"="false" {
+entry:
+  switch i32 %x, label %return [
+    i32 3, label %bb0
+    i32 1, label %bb1
+    i32 4, label %bb1
+    i32 5, label %bb2
+  ]
+bb0: tail call void @g(i32 0) br label %return
+bb1: tail call void @g(i32 1) br label %return
+bb2: tail call void @g(i32 1) br label %return
+return: ret void
+
+; Lowered as a jump table, both with and without optimization.
+; CHECK-LABEL: basic_nojumptable_false
+; CHECK: decl
+; CHECK: cmpl $4
+; CHECK: ja
+; CHECK: jmpq *.LJTI
+}
+
 
 define void @simple_ranges(i32 %x) {
 entry:
@@ -46,6 +87,8 @@ entry:
 bb0: tail call void @g(i32 0) br label %return
 bb1: tail call void @g(i32 1) br label %return
 return: ret void
+
+
 
 ; Should be lowered to two range checks.
 ; CHECK-LABEL: simple_ranges
@@ -707,7 +750,7 @@ return: ret void
 }
 
 
-define i32 @pr27132(i32 %i) {
+define i32 @pr27135(i32 %i) {
 entry:
   br i1 undef, label %sw, label %end
 sw:
@@ -727,7 +770,7 @@ end:
   %p = phi i32 [ 1, %sw ], [ 0, %entry ]
   ret i32 %p
 
-; CHECK-LABEL: pr27132:
+; CHECK-LABEL: pr27135:
 ; The switch is lowered with bit tests. Since the case range is contiguous, the
 ; second bit test is redundant and can be skipped. Check that we don't update
 ; the phi node with an incoming value from the MBB of the skipped bit test

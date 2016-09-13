@@ -804,6 +804,9 @@ def CC_X86_64_Intr : CallingConv<[
 
 // This is the root argument convention for the X86-32 backend.
 def CC_X86_32 : CallingConv<[
+  // X86_INTR calling convention is valid in MCU target and should override the
+  // MCU calling convention. Thus, this should be checked before isTargetMCU().
+  CCIfCC<"CallingConv::X86_INTR", CCDelegateTo<CC_X86_32_Intr>>,
   CCIfSubtarget<"isTargetMCU()", CCDelegateTo<CC_X86_32_MCU>>,
   CCIfCC<"CallingConv::X86_FastCall", CCDelegateTo<CC_X86_32_FastCall>>,
   CCIfCC<"CallingConv::X86_VectorCall", CCDelegateTo<CC_X86_32_VectorCall>>,
@@ -811,7 +814,6 @@ def CC_X86_32 : CallingConv<[
   CCIfCC<"CallingConv::Fast", CCDelegateTo<CC_X86_32_FastCC>>,
   CCIfCC<"CallingConv::GHC", CCDelegateTo<CC_X86_32_GHC>>,
   CCIfCC<"CallingConv::HiPE", CCDelegateTo<CC_X86_32_HiPE>>,
-  CCIfCC<"CallingConv::X86_INTR", CCDelegateTo<CC_X86_32_Intr>>,
 
   // Otherwise, drop to normal X86-32 CC
   CCDelegateTo<CC_X86_32_C>
@@ -888,15 +890,23 @@ def CSR_64_MostRegs : CalleeSavedRegs<(add RBX, RCX, RDX, RSI, RDI, R8, R9, R10,
                                            (sequence "XMM%u", 0, 15))>;
 
 def CSR_32_AllRegs     : CalleeSavedRegs<(add EAX, EBX, ECX, EDX, EBP, ESI,
-                                              EDI, ESP)>;
+                                              EDI)>;
 def CSR_32_AllRegs_SSE : CalleeSavedRegs<(add CSR_32_AllRegs,
                                               (sequence "XMM%u", 0, 7))>;
+def CSR_32_AllRegs_AVX : CalleeSavedRegs<(add CSR_32_AllRegs,
+                                              (sequence "YMM%u", 0, 7))>;
+def CSR_32_AllRegs_AVX512 : CalleeSavedRegs<(add CSR_32_AllRegs,
+                                                 (sequence "ZMM%u", 0, 7),
+                                                 (sequence "K%u", 0, 7))>;
 
-def CSR_64_AllRegs     : CalleeSavedRegs<(add CSR_64_MostRegs, RAX, RSP,
-                                              (sequence "XMM%u", 16, 31))>;
-def CSR_64_AllRegs_AVX : CalleeSavedRegs<(sub (add CSR_64_MostRegs, RAX, RSP,
-                                                   (sequence "YMM%u", 0, 31)),
+def CSR_64_AllRegs     : CalleeSavedRegs<(add CSR_64_MostRegs, RAX)>;
+def CSR_64_AllRegs_AVX : CalleeSavedRegs<(sub (add CSR_64_MostRegs, RAX,
+                                                   (sequence "YMM%u", 0, 15)),
                                               (sequence "XMM%u", 0, 15))>;
+def CSR_64_AllRegs_AVX512 : CalleeSavedRegs<(sub (add CSR_64_MostRegs, RAX,
+                                                      (sequence "ZMM%u", 0, 31),
+                                                      (sequence "K%u", 0, 7)),
+                                                 (sequence "XMM%u", 0, 15))>;
 
 // Standard C + YMM6-15
 def CSR_Win64_Intel_OCL_BI_AVX : CalleeSavedRegs<(add RBX, RBP, RDI, RSI, R12,

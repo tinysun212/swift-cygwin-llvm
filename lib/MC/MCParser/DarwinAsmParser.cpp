@@ -50,6 +50,7 @@ public:
     // Call the base implementation.
     this->MCAsmParserExtension::Initialize(Parser);
 
+    addDirectiveHandler<&DarwinAsmParser::parseDirectiveAltEntry>(".alt_entry");
     addDirectiveHandler<&DarwinAsmParser::parseDirectiveDesc>(".desc");
     addDirectiveHandler<&DarwinAsmParser::parseDirectiveIndirectSymbol>(
       ".indirect_symbol");
@@ -182,6 +183,7 @@ public:
     LastVersionMinDirective = SMLoc();
   }
 
+  bool parseDirectiveAltEntry(StringRef, SMLoc);
   bool parseDirectiveDesc(StringRef, SMLoc);
   bool parseDirectiveIndirectSymbol(StringRef, SMLoc);
   bool parseDirectiveDumpOrLoad(StringRef, SMLoc);
@@ -415,6 +417,26 @@ bool DarwinAsmParser::parseSectionSwitch(const char *Segment,
   return false;
 }
 
+/// parseDirectiveAltEntry
+///  ::= .alt_entry identifier
+bool DarwinAsmParser::parseDirectiveAltEntry(StringRef, SMLoc) {
+  StringRef Name;
+  if (getParser().parseIdentifier(Name))
+    return TokError("expected identifier in directive");
+
+  // Look up symbol.
+  MCSymbol *Sym = getContext().getOrCreateSymbol(Name);
+
+  if (Sym->isDefined())
+    return TokError(".alt_entry must preceed symbol definition");
+
+  if (!getStreamer().EmitSymbolAttribute(Sym, MCSA_AltEntry))
+    return TokError("unable to emit symbol attribute");
+
+  Lex();
+  return false;
+}
+
 /// parseDirectiveDesc
 ///  ::= .desc identifier , expression
 bool DarwinAsmParser::parseDirectiveDesc(StringRef, SMLoc) {
@@ -515,7 +537,6 @@ bool DarwinAsmParser::parseDirectiveLinkerOption(StringRef IDVal, SMLoc) {
 
     Args.push_back(Data);
 
-    Lex();
     if (getLexer().is(AsmToken::EndOfStatement))
       break;
 
@@ -937,8 +958,8 @@ bool DarwinAsmParser::parseVersionMin(StringRef Directive, SMLoc Loc) {
     if (getLexer().isNot(AsmToken::Integer))
       return TokError("invalid OS update number");
     Update = getLexer().getTok().getIntVal();
-  if (Update > 255 || Update < 0)
-    return TokError("invalid OS update number");
+    if (Update > 255 || Update < 0)
+      return TokError("invalid OS update number");
     Lex();
   }
 

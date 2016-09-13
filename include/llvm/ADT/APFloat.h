@@ -25,6 +25,8 @@ struct fltSemantics;
 class APSInt;
 class StringRef;
 
+template <typename T> class SmallVectorImpl;
+
 /// Enum that represents what fraction of the LSB truncated bits of an fp number
 /// represent.
 ///
@@ -645,6 +647,7 @@ private:
 /// These additional declarations are required in order to compile LLVM with IBM
 /// xlC compiler.
 hash_code hash_value(const APFloat &Arg);
+int ilogb(const APFloat &Arg);
 APFloat scalbn(APFloat X, int Exp, APFloat::roundingMode);
 
 /// \brief Equivalent of C standard library function.

@@ -29,8 +29,6 @@ using namespace llvm;
 // Out of line method to get vtable etc for class.
 void ValueMapTypeRemapper::anchor() {}
 void ValueMaterializer::anchor() {}
-void ValueMaterializer::materializeInitFor(GlobalValue *New, GlobalValue *Old) {
-}
 
 namespace {
 
@@ -145,20 +143,6 @@ public:
   /// Find the mapping for MD.  Guarantees that the return will be resolved
   /// (not an MDNode, or MDNode::isResolved() returns true).
   Metadata *mapMetadata(const Metadata *MD);
-
-  // Map LocalAsMetadata, which never gets memoized.
-  //
-  // If the referenced local is not mapped, the principled return is nullptr.
-  // However, optimization passes sometimes move metadata operands *before* the
-  // SSA values they reference.  To prevent crashes in \a RemapInstruction(),
-  // return "!{}" when RF_IgnoreMissingLocals is not set.
-  //
-  // \note Adding a mapping for LocalAsMetadata is unsupported.  Add a mapping
-  // to the value map for the SSA value in question instead.
-  //
-  // FIXME: Once we have a verifier check for forward references to SSA values
-  // through metadata operands, always return nullptr on unmapped locals.
-  Metadata *mapLocalAsMetadata(const LocalAsMetadata &LAM);
 
   void scheduleMapGlobalInitializer(GlobalVariable &GV, Constant &Init,
                                     unsigned MCID);
@@ -356,17 +340,15 @@ Value *Mapper::mapValue(const Value *V) {
   ValueToValueMapTy::iterator I = getVM().find(V);
 
   // If the value already exists in the map, use it.
-  if (I != getVM().end() && I->second)
+  if (I != getVM().end()) {
+    assert(I->second && "Unexpected null mapping");
     return I->second;
+  }
 
   // If we have a materializer and it can materialize a value, use that.
   if (auto *Materializer = getMaterializer()) {
-    if (Value *NewV =
-            Materializer->materializeDeclFor(const_cast<Value *>(V))) {
+    if (Value *NewV = Materializer->materialize(const_cast<Value *>(V))) {
       getVM()[V] = NewV;
-      if (auto *NewGV = dyn_cast<GlobalValue>(NewV))
-        Materializer->materializeInitFor(
-            NewGV, cast<GlobalValue>(const_cast<Value *>(V)));
       return NewV;
     }
   }
@@ -450,10 +432,10 @@ Value *Mapper::mapValue(const Value *V) {
     Mapped = mapValueOrNull(Op);
     if (!Mapped)
       return nullptr;
-    if (Mapped != C)
+    if (Mapped != Op)
       break;
   }
-  
+
   // See if the type mapper wants to remap the type as well.
   Type *NewTy = C->getType();
   if (TypeMapper)
@@ -470,11 +452,11 @@ Value *Mapper::mapValue(const Value *V) {
   Ops.reserve(NumOperands);
   for (unsigned j = 0; j != OpNo; ++j)
     Ops.push_back(cast<Constant>(C->getOperand(j)));
-  
+
   // If one of the operands mismatch, push it and the other mapped operands.
   if (OpNo != NumOperands) {
     Ops.push_back(cast<Constant>(Mapped));
-  
+
     // Map the rest of the operands that aren't processed yet.
     for (++OpNo; OpNo != NumOperands; ++OpNo) {
       Mapped = mapValueOrNull(C->getOperand(OpNo));
@@ -689,7 +671,7 @@ void MDNodeMapper::UniquedGraph::propagateChanges() {
       if (D.HasChanged)
         continue;
 
-      if (!llvm::any_of(N->operands(), [&](const Metadata *Op) {
+      if (none_of(N->operands(), [&](const Metadata *Op) {
             auto Where = Info.find(Op);
             return Where != Info.end() && Where->second.HasChanged;
           }))
@@ -821,22 +803,6 @@ Optional<Metadata *> Mapper::mapSimpleMetadata(const Metadata *MD) {
   return None;
 }
 
-Metadata *Mapper::mapLocalAsMetadata(const LocalAsMetadata &LAM) {
-  // Lookup the mapping for the value itself, and return the appropriate
-  // metadata.
-  if (Value *V = mapValue(LAM.getValue())) {
-    if (V == LAM.getValue())
-      return const_cast<LocalAsMetadata *>(&LAM);
-    return ValueAsMetadata::get(V);
-  }
-
-  // FIXME: always return nullptr once Verifier::verifyDominatesUse() ensures
-  // metadata operands only reference defined SSA values.
-  return (Flags & RF_IgnoreMissingLocals)
-             ? nullptr
-             : MDTuple::get(LAM.getContext(), None);
-}
-
 Metadata *Mapper::mapMetadata(const Metadata *MD) {
   assert(MD && "Expected valid metadata");
   assert(!isa<LocalAsMetadata>(MD) && "Unexpected local metadata");
@@ -887,11 +853,11 @@ void Mapper::flush() {
 
 void Mapper::remapInstruction(Instruction *I) {
   // Remap operands.
-  for (User::op_iterator op = I->op_begin(), E = I->op_end(); op != E; ++op) {
-    Value *V = mapValue(*op);
+  for (Use &Op : I->operands()) {
+    Value *V = mapValue(Op);
     // If we aren't ignoring missing entries, assert that something happened.
     if (V)
-      *op = V;
+      Op = V;
     else
       assert((Flags & RF_IgnoreMissingLocals) &&
              "Referenced value not in value map!");
@@ -954,8 +920,9 @@ void Mapper::remapFunction(Function &F) {
   // Remap the metadata attachments.
   SmallVector<std::pair<unsigned, MDNode *>, 8> MDs;
   F.getAllMetadata(MDs);
+  F.clearMetadata();
   for (const auto &I : MDs)
-    F.setMetadata(I.first, cast_or_null<MDNode>(mapMetadata(I.second)));
+    F.addMetadata(I.first, *cast<MDNode>(mapMetadata(I.second)));
 
   // Remap the argument types.
   if (TypeMapper)

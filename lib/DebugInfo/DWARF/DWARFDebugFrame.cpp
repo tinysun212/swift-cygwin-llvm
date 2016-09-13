@@ -12,6 +12,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/Optional.h"
 #include "llvm/ADT/SmallString.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/DataTypes.h"
 #include "llvm/Support/Dwarf.h"
@@ -19,6 +20,7 @@
 #include "llvm/Support/Format.h"
 #include "llvm/Support/raw_ostream.h"
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace llvm;
@@ -201,28 +203,27 @@ public:
       SmallString<8> Augmentation, uint8_t AddressSize,
       uint8_t SegmentDescriptorSize, uint64_t CodeAlignmentFactor,
       int64_t DataAlignmentFactor, uint64_t ReturnAddressRegister,
-      SmallString<8> AugmentationData, Optional<uint32_t> FDEPointerEncoding,
-      Optional<uint32_t> LSDAPointerEncoding)
+      SmallString<8> AugmentationData, uint32_t FDEPointerEncoding,
+      uint32_t LSDAPointerEncoding)
       : FrameEntry(FK_CIE, Offset, Length), Version(Version),
-        Augmentation(std::move(Augmentation)),
-        AddressSize(AddressSize),
+        Augmentation(std::move(Augmentation)), AddressSize(AddressSize),
         SegmentDescriptorSize(SegmentDescriptorSize),
         CodeAlignmentFactor(CodeAlignmentFactor),
         DataAlignmentFactor(DataAlignmentFactor),
         ReturnAddressRegister(ReturnAddressRegister),
-        AugmentationData(AugmentationData),
+        AugmentationData(std::move(AugmentationData)),
         FDEPointerEncoding(FDEPointerEncoding),
-        LSDAPointerEncoding(LSDAPointerEncoding) { }
+        LSDAPointerEncoding(LSDAPointerEncoding) {}
 
   ~CIE() override {}
 
   StringRef getAugmentationString() const { return Augmentation; }
   uint64_t getCodeAlignmentFactor() const { return CodeAlignmentFactor; }
   int64_t getDataAlignmentFactor() const { return DataAlignmentFactor; }
-  Optional<uint32_t> getFDEPointerEncoding() const {
+  uint32_t getFDEPointerEncoding() const {
     return FDEPointerEncoding;
   }
-  Optional<uint32_t> getLSDAPointerEncoding() const {
+  uint32_t getLSDAPointerEncoding() const {
     return LSDAPointerEncoding;
   }
 
@@ -244,8 +245,12 @@ public:
                  (int32_t)DataAlignmentFactor);
     OS << format("  Return address column: %d\n",
                  (int32_t)ReturnAddressRegister);
-    if (!AugmentationData.empty())
-      OS << "  Augmentation data:     " << AugmentationData << "\n";
+    if (!AugmentationData.empty()) {
+      OS << "  Augmentation data:    ";
+      for (uint8_t Byte : AugmentationData)
+        OS << ' ' << hexdigit(Byte >> 4) << hexdigit(Byte & 0xf);
+      OS << "\n";
+    }
     OS << "\n";
   }
 
@@ -265,8 +270,8 @@ private:
 
   // The following are used when the CIE represents an EH frame entry.
   SmallString<8> AugmentationData;
-  Optional<uint32_t> FDEPointerEncoding;
-  Optional<uint32_t> LSDAPointerEncoding;
+  uint32_t FDEPointerEncoding;
+  uint32_t LSDAPointerEncoding;
 };
 
 
@@ -556,16 +561,16 @@ void DWARFDebugFrame::parse(DataExtractor Data) {
       uint64_t ReturnAddressRegister = Data.getULEB128(&Offset);
 
       // Parse the augmentation data for EH CIEs
-      StringRef AugmentationData;
-      Optional<uint32_t> FDEPointerEncoding;
-      Optional<uint32_t> LSDAPointerEncoding;
+      StringRef AugmentationData("");
+      uint32_t FDEPointerEncoding = DW_EH_PE_omit;
+      uint32_t LSDAPointerEncoding = DW_EH_PE_omit;
       if (IsEH) {
         Optional<uint32_t> PersonalityEncoding;
         Optional<uint64_t> Personality;
 
-        uint64_t AugmentationLength = 0;
-        uint32_t StartAugmentationOffset = 0;
-        uint32_t EndAugmentationOffset = 0;
+        Optional<uint64_t> AugmentationLength;
+        uint32_t StartAugmentationOffset;
+        uint32_t EndAugmentationOffset;
 
         // Walk the augmentation string to get all the augmentation data.
         for (unsigned i = 0, e = AugmentationString.size(); i != e; ++i) {
@@ -573,8 +578,6 @@ void DWARFDebugFrame::parse(DataExtractor Data) {
             default:
               ReportError("Unknown augmentation character in entry at %lx");
             case 'L':
-              if (LSDAPointerEncoding)
-                ReportError("Duplicate LSDA encoding in entry at %lx");
               LSDAPointerEncoding = Data.getU8(&Offset);
               break;
             case 'P': {
@@ -585,8 +588,6 @@ void DWARFDebugFrame::parse(DataExtractor Data) {
               break;
             }
             case 'R':
-              if (FDEPointerEncoding)
-                ReportError("Duplicate FDE encoding in entry at %lx");
               FDEPointerEncoding = Data.getU8(&Offset);
               break;
             case 'z':
@@ -596,20 +597,22 @@ void DWARFDebugFrame::parse(DataExtractor Data) {
               // the string contains a 'z'.
               AugmentationLength = Data.getULEB128(&Offset);
               StartAugmentationOffset = Offset;
-              EndAugmentationOffset =
-                Offset + static_cast<uint32_t>(AugmentationLength);
+              EndAugmentationOffset = Offset +
+                static_cast<uint32_t>(*AugmentationLength);
           }
         }
 
-        if (Offset != EndAugmentationOffset)
-          ReportError("Parsing augmentation data at %lx failed");
+        if (AugmentationLength.hasValue()) {
+          if (Offset != EndAugmentationOffset)
+            ReportError("Parsing augmentation data at %lx failed");
 
-        AugmentationData = Data.getData().slice(StartAugmentationOffset,
-                                                EndAugmentationOffset);
+          AugmentationData = Data.getData().slice(StartAugmentationOffset,
+                                                  EndAugmentationOffset);
+        }
       }
 
       auto Cie = make_unique<CIE>(StartOffset, Length, Version,
-                                  StringRef(Augmentation), AddressSize,
+                                  AugmentationString, AddressSize,
                                   SegmentDescriptorSize, CodeAlignmentFactor,
                                   DataAlignmentFactor, ReturnAddressRegister,
                                   AugmentationData, FDEPointerEncoding,
@@ -628,12 +631,11 @@ void DWARFDebugFrame::parse(DataExtractor Data) {
         if (!Cie)
           ReportError("Parsing FDE data at %lx failed due to missing CIE");
 
-        Optional<uint32_t> FDEPointerEncoding = Cie->getFDEPointerEncoding();
-        if (!FDEPointerEncoding)
-          ReportError("Parsing at %lx failed due to missing pointer encoding");
+        InitialLocation = readPointer(Data, Offset,
+                                      Cie->getFDEPointerEncoding());
+        AddressRange = readPointer(Data, Offset,
+                                   Cie->getFDEPointerEncoding());
 
-        InitialLocation = readPointer(Data, Offset, *FDEPointerEncoding);
-        AddressRange = readPointer(Data, Offset, *FDEPointerEncoding);
         StringRef AugmentationString = Cie->getAugmentationString();
         if (!AugmentationString.empty()) {
           // Parse the augmentation length and data for this FDE.
@@ -643,9 +645,8 @@ void DWARFDebugFrame::parse(DataExtractor Data) {
             Offset + static_cast<uint32_t>(AugmentationLength);
 
           // Decode the LSDA if the CIE augmentation string said we should.
-          uint64_t LSDA = 0;
-          if (Optional<uint32_t> Encoding = Cie->getLSDAPointerEncoding())
-            LSDA = readPointer(Data, Offset, *Encoding);
+          if (Cie->getLSDAPointerEncoding() != DW_EH_PE_omit)
+            readPointer(Data, Offset, Cie->getLSDAPointerEncoding());
 
           if (Offset != EndAugmentationOffset)
             ReportError("Parsing augmentation data at %lx failed");

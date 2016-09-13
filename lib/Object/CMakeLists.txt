@@ -3,10 +3,8 @@ add_llvm_library(LLVMObject
   ArchiveWriter.cpp
   Binary.cpp
   COFFObjectFile.cpp
-  COFFYAML.cpp
   ELF.cpp
   ELFObjectFile.cpp
-  ELFYAML.cpp
   Error.cpp
   IRObjectFile.cpp
   MachOObjectFile.cpp
@@ -23,6 +21,4 @@ add_llvm_library(LLVMObject
 
   DEPENDS
   intrinsics_gen
-
-  LINK_LIBS ${XAR_LIB}
   )

@@ -23,8 +23,6 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
-#include <map>
-#include <tuple>
 
 #define DEBUG_TYPE "ir"
 
@@ -225,19 +223,12 @@ public:
 /// used behind the scenes to implement getelementpr constant exprs.
 class GetElementPtrConstantExpr : public ConstantExpr {
   Type *SrcElementTy;
+  Type *ResElementTy;
   void anchor() override;
   GetElementPtrConstantExpr(Type *SrcElementTy, Constant *C,
                             ArrayRef<Constant *> IdxList, Type *DestTy);
 
 public:
-  static GetElementPtrConstantExpr *Create(Constant *C,
-                                           ArrayRef<Constant*> IdxList,
-                                           Type *DestTy,
-                                           unsigned Flags) {
-    return Create(
-        cast<PointerType>(C->getType()->getScalarType())->getElementType(), C,
-        IdxList, DestTy, Flags);
-  }
   static GetElementPtrConstantExpr *Create(Type *SrcElementTy, Constant *C,
                                            ArrayRef<Constant *> IdxList,
                                            Type *DestTy, unsigned Flags) {
@@ -247,6 +238,7 @@ public:
     return Result;
   }
   Type *getSourceElementType() const;
+  Type *getResultElementType() const;
   /// Transparently provide more efficient getOperand methods.
   DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
 

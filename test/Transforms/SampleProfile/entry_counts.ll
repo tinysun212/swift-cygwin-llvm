@@ -1,11 +1,19 @@
 ; RUN: opt < %s -sample-profile -sample-profile-file=%S/Inputs/entry_counts.prof -S | FileCheck %s
+; RUN: opt < %s -passes=sample-profile -sample-profile-file=%S/Inputs/entry_counts.prof -S | FileCheck %s
 
 ; According to the profile, function empty() was called 13,293 times.
-; CHECK: {{.*}} = !{!"function_entry_count", i64 13293}
+; CHECK: {{.*}} = !{!"function_entry_count", i64 13294}
 
 define void @empty() !dbg !4 {
 entry:
   ret void, !dbg !9
+}
+
+; This function does not have profile, check if function_entry_count is 0
+; CHECK: {{.*}} = !{!"function_entry_count", i64 0}
+define void @no_profile() {
+entry:
+  ret void
 }
 
 !llvm.dbg.cu = !{!0}

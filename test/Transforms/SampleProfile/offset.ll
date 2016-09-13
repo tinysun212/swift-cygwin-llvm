@@ -1,4 +1,5 @@
 ; RUN: opt < %s -sample-profile -sample-profile-file=%S/Inputs/offset.prof | opt -analyze -branch-prob | FileCheck %s
+; RUN: opt < %s -passes=sample-profile -sample-profile-file=%S/Inputs/offset.prof | opt -analyze -branch-prob | FileCheck %s
 
 ; Original C++ code for this test case:
 ;
@@ -28,8 +29,8 @@ entry:
   %0 = load i32, i32* %a.addr, align 4, !dbg !14
   %cmp = icmp sgt i32 %0, 0, !dbg !18
   br i1 %cmp, label %if.then, label %if.else, !dbg !19
-; CHECK: edge entry -> if.then probability is 0x0147ae14 / 0x80000000 = 1.00%
-; CHECK: edge entry -> if.else probability is 0x7eb851ec / 0x80000000 = 99.00% [HOT edge]
+; CHECK: edge entry -> if.then probability is 0x0167ba82 / 0x80000000 = 1.10%
+; CHECK: edge entry -> if.else probability is 0x7e98457e / 0x80000000 = 98.90% [HOT edge]
 
 if.then:                                          ; preds = %entry
   store i32 10, i32* %retval, align 4, !dbg !20

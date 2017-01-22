@@ -63,6 +63,21 @@ const unsigned MaxNumPhiBBsValueReachabilityCheck = 20;
 // depth otherwise the algorithm in aliasGEP will assert.
 static const unsigned MaxLookupSearchDepth = 6;
 
+bool BasicAAResult::invalidate(Function &F, const PreservedAnalyses &PA,
+                               FunctionAnalysisManager::Invalidator &Inv) {
+  // We don't care if this analysis itself is preserved, it has no state. But
+  // we need to check that the analyses it depends on have been. Note that we
+  // may be created without handles to some analyses and in that case don't
+  // depend on them.
+  if (Inv.invalidate<AssumptionAnalysis>(F, PA) ||
+      (DT && Inv.invalidate<DominatorTreeAnalysis>(F, PA)) ||
+      (LI && Inv.invalidate<LoopAnalysis>(F, PA)))
+    return true;
+
+  // Otherwise this analysis result remains valid.
+  return false;
+}
+
 //===----------------------------------------------------------------------===//
 // Useful predicates
 //===----------------------------------------------------------------------===//
@@ -227,7 +242,7 @@ static bool isObjectSize(const Value *V, uint64_t Size, const DataLayout &DL,
           Offset = 0;
           return V;
         }
-      // FALL THROUGH.
+        LLVM_FALLTHROUGH;
       case Instruction::Add:
         V = GetLinearExpression(BOp->getOperand(0), Scale, Offset, ZExtBits,
                                 SExtBits, DL, Depth + 1, AC, DT, NSW, NUW);
@@ -275,7 +290,7 @@ static bool isObjectSize(const Value *V, uint64_t Size, const DataLayout &DL,
         GetLinearExpression(CastOp, Scale, Offset, ZExtBits, SExtBits, DL,
                             Depth + 1, AC, DT, NSW, NUW);
 
-    // zext(zext(%x)) == zext(%x), and similiarly for sext; we'll handle this
+    // zext(zext(%x)) == zext(%x), and similarly for sext; we'll handle this
     // by just incrementing the number of bits we've extended by.
     unsigned ExtendedBy = NewWidth - SmallWidth;
 
@@ -409,11 +424,13 @@ bool BasicAAResult::DecomposeGEPExpression(const Value *V,
     // Walk the indices of the GEP, accumulating them into BaseOff/VarIndices.
     gep_type_iterator GTI = gep_type_begin(GEPOp);
     unsigned PointerSize = DL.getPointerSizeInBits(AS);
+    // Assume all GEP operands are constants until proven otherwise.
+    bool GepHasConstantOffset = true;
     for (User::const_op_iterator I = GEPOp->op_begin() + 1, E = GEPOp->op_end();
-         I != E; ++I) {
+         I != E; ++I, ++GTI) {
       const Value *Index = *I;
       // Compute the (potentially symbolic) offset in bytes for this index.
-      if (StructType *STy = dyn_cast<StructType>(*GTI++)) {
+      if (StructType *STy = GTI.getStructTypeOrNull()) {
         // For a struct, add the member offset.
         unsigned FieldNo = cast<ConstantInt>(Index)->getZExtValue();
         if (FieldNo == 0)
@@ -429,11 +446,13 @@ bool BasicAAResult::DecomposeGEPExpression(const Value *V,
         if (CIdx->isZero())
           continue;
         Decomposed.OtherOffset +=
-          DL.getTypeAllocSize(*GTI) * CIdx->getSExtValue();
+          DL.getTypeAllocSize(GTI.getIndexedType()) * CIdx->getSExtValue();
         continue;
       }
 
-      uint64_t Scale = DL.getTypeAllocSize(*GTI);
+      GepHasConstantOffset = false;
+
+      uint64_t Scale = DL.getTypeAllocSize(GTI.getIndexedType());
       unsigned ZExtBits = 0, SExtBits = 0;
 
       // If the integer type is smaller than the pointer size, it is implicitly
@@ -458,7 +477,7 @@ bool BasicAAResult::DecomposeGEPExpression(const Value *V,
       //   A[x][x] -> x*16 + x*4 -> x*20
       // This also ensures that 'x' only appears in the index list once.
       for (unsigned i = 0, e = Decomposed.VarIndices.size(); i != e; ++i) {
-        if (Decomposed.VarIndices[i].V == Index && 
+        if (Decomposed.VarIndices[i].V == Index &&
             Decomposed.VarIndices[i].ZExtBits == ZExtBits &&
             Decomposed.VarIndices[i].SExtBits == SExtBits) {
           Scale += Decomposed.VarIndices[i].Scale;
@@ -479,10 +498,12 @@ bool BasicAAResult::DecomposeGEPExpression(const Value *V,
     }
 
     // Take care of wrap-arounds
-    Decomposed.StructOffset =
-      adjustToPointerSize(Decomposed.StructOffset, PointerSize);
-    Decomposed.OtherOffset =
-      adjustToPointerSize(Decomposed.OtherOffset, PointerSize);
+    if (GepHasConstantOffset) {
+      Decomposed.StructOffset =
+          adjustToPointerSize(Decomposed.StructOffset, PointerSize);
+      Decomposed.OtherOffset =
+          adjustToPointerSize(Decomposed.OtherOffset, PointerSize);
+    }
 
     // Analyze the base pointer next.
     V = GEPOp->getOperand(0);
@@ -603,6 +624,10 @@ FunctionModRefBehavior BasicAAResult::getModRefBehavior(const Function *F) {
 
   if (F->onlyAccessesArgMemory())
     Min = FunctionModRefBehavior(Min & FMRB_OnlyAccessesArgumentPointees);
+  else if (F->onlyAccessesInaccessibleMemory())
+    Min = FunctionModRefBehavior(Min & FMRB_OnlyAccessesInaccessibleMem);
+  else if (F->onlyAccessesInaccessibleMemOrArgMem())
+    Min = FunctionModRefBehavior(Min & FMRB_OnlyAccessesInaccessibleOrArgMem);
 
   return Min;
 }
@@ -732,7 +757,8 @@ ModRefInfo BasicAAResult::getModRefInfo(ImmutableCallSite CS,
       // pointer were passed to arguments that were neither of these, then it
       // couldn't be no-capture.
       if (!(*CI)->getType()->isPointerTy() ||
-          (!CS.doesNotCapture(OperandNo) && !CS.isByValArgument(OperandNo)))
+          (!CS.doesNotCapture(OperandNo) &&
+           OperandNo < CS.getNumArgOperands() && !CS.isByValArgument(OperandNo)))
         continue;
 
       // If this is a no-capture pointer argument, see if we can tell that it
@@ -763,6 +789,31 @@ ModRefInfo BasicAAResult::getModRefInfo(ImmutableCallSite CS,
     // fallback to the generic handling below.
     if (getBestAAResults().alias(MemoryLocation(Inst), Loc) == NoAlias)
       return MRI_NoModRef;
+  }
+
+  // The semantics of memcpy intrinsics forbid overlap between their respective
+  // operands, i.e., source and destination of any given memcpy must no-alias.
+  // If Loc must-aliases either one of these two locations, then it necessarily
+  // no-aliases the other.
+  if (auto *Inst = dyn_cast<MemCpyInst>(CS.getInstruction())) {
+    AliasResult SrcAA, DestAA;
+
+    if ((SrcAA = getBestAAResults().alias(MemoryLocation::getForSource(Inst),
+                                          Loc)) == MustAlias)
+      // Loc is exactly the memcpy source thus disjoint from memcpy dest.
+      return MRI_Ref;
+    if ((DestAA = getBestAAResults().alias(MemoryLocation::getForDest(Inst),
+                                           Loc)) == MustAlias)
+      // The converse case.
+      return MRI_Mod;
+
+    // It's also possible for Loc to alias both src and dest, or neither.
+    ModRefInfo rv = MRI_NoModRef;
+    if (SrcAA != NoAlias)
+      rv = static_cast<ModRefInfo>(rv | MRI_Ref);
+    if (DestAA != NoAlias)
+      rv = static_cast<ModRefInfo>(rv | MRI_Mod);
+    return rv;
   }
 
   // While the assume intrinsic is marked as arbitrarily writing so that
@@ -1705,7 +1756,7 @@ bool BasicAAResult::constantOffsetHeuristic(
 // BasicAliasAnalysis Pass
 //===----------------------------------------------------------------------===//
 
-char BasicAA::PassID;
+AnalysisKey BasicAA::Key;
 
 BasicAAResult BasicAA::run(Function &F, FunctionAnalysisManager &AM) {
   return BasicAAResult(F.getParent()->getDataLayout(),

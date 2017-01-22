@@ -88,6 +88,52 @@ typedef DenseMap<Edge, uint64_t> EdgeWeightMap;
 typedef DenseMap<const BasicBlock *, SmallVector<const BasicBlock *, 8>>
     BlockEdgeMap;
 
+class SampleCoverageTracker {
+public:
+  SampleCoverageTracker() : SampleCoverage(), TotalUsedSamples(0) {}
+
+  bool markSamplesUsed(const FunctionSamples *FS, uint32_t LineOffset,
+                       uint32_t Discriminator, uint64_t Samples);
+  unsigned computeCoverage(unsigned Used, unsigned Total) const;
+  unsigned countUsedRecords(const FunctionSamples *FS) const;
+  unsigned countBodyRecords(const FunctionSamples *FS) const;
+  uint64_t getTotalUsedSamples() const { return TotalUsedSamples; }
+  uint64_t countBodySamples(const FunctionSamples *FS) const;
+  void clear() {
+    SampleCoverage.clear();
+    TotalUsedSamples = 0;
+  }
+
+private:
+  typedef std::map<LineLocation, unsigned> BodySampleCoverageMap;
+  typedef DenseMap<const FunctionSamples *, BodySampleCoverageMap>
+      FunctionSamplesCoverageMap;
+
+  /// Coverage map for sampling records.
+  ///
+  /// This map keeps a record of sampling records that have been matched to
+  /// an IR instruction. This is used to detect some form of staleness in
+  /// profiles (see flag -sample-profile-check-coverage).
+  ///
+  /// Each entry in the map corresponds to a FunctionSamples instance.  This is
+  /// another map that counts how many times the sample record at the
+  /// given location has been used.
+  FunctionSamplesCoverageMap SampleCoverage;
+
+  /// Number of samples used from the profile.
+  ///
+  /// When a sampling record is used for the first time, the samples from
+  /// that record are added to this accumulator.  Coverage is later computed
+  /// based on the total number of samples available in this function and
+  /// its callsites.
+  ///
+  /// Note that this accumulator tracks samples used from a single function
+  /// and all the inlined callsites. Strictly, we should have a map of counters
+  /// keyed by FunctionSamples pointers, but these stats are cleared after
+  /// every function, so we just need to keep a single counter.
+  uint64_t TotalUsedSamples;
+};
+
 /// \brief Sample profile pass.
 ///
 /// This pass reads profile data from the file specified by
@@ -110,9 +156,9 @@ protected:
   bool runOnFunction(Function &F);
   unsigned getFunctionLoc(Function &F);
   bool emitAnnotations(Function &F);
-  ErrorOr<uint64_t> getInstWeight(const Instruction &I) const;
-  ErrorOr<uint64_t> getBlockWeight(const BasicBlock *BB) const;
-  const FunctionSamples *findCalleeFunctionSamples(const CallInst &I) const;
+  ErrorOr<uint64_t> getInstWeight(const Instruction &I);
+  ErrorOr<uint64_t> getBlockWeight(const BasicBlock *BB);
+  const FunctionSamples *findCalleeFunctionSamples(const Instruction &I) const;
   const FunctionSamples *findFunctionSamples(const Instruction &I) const;
   bool inlineHotFunctions(Function &F);
   void printEdgeWeight(raw_ostream &OS, Edge E);
@@ -169,6 +215,8 @@ protected:
   /// \brief Successors for each basic block in the CFG.
   BlockEdgeMap Successors;
 
+  SampleCoverageTracker CoverageTracker;
+
   /// \brief Profile reader object.
   std::unique_ptr<SampleProfileReader> Reader;
 
@@ -176,7 +224,7 @@ protected:
   FunctionSamples *Samples;
 
   /// \brief Name of the profile file to load.
-  StringRef Filename;
+  std::string Filename;
 
   /// \brief Flag indicating whether the profile input loaded successfully.
   bool ProfileIsValid;
@@ -204,63 +252,16 @@ public:
   bool doInitialization(Module &M) override {
     return SampleLoader.doInitialization(M);
   }
-  const char *getPassName() const override { return "Sample profile pass"; }
+  StringRef getPassName() const override { return "Sample profile pass"; }
   bool runOnModule(Module &M) override;
 
   void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.addRequired<AssumptionCacheTracker>();
   }
+
 private:
   SampleProfileLoader SampleLoader;
 };
-
-class SampleCoverageTracker {
-public:
-  SampleCoverageTracker() : SampleCoverage(), TotalUsedSamples(0) {}
-
-  bool markSamplesUsed(const FunctionSamples *FS, uint32_t LineOffset,
-                       uint32_t Discriminator, uint64_t Samples);
-  unsigned computeCoverage(unsigned Used, unsigned Total) const;
-  unsigned countUsedRecords(const FunctionSamples *FS) const;
-  unsigned countBodyRecords(const FunctionSamples *FS) const;
-  uint64_t getTotalUsedSamples() const { return TotalUsedSamples; }
-  uint64_t countBodySamples(const FunctionSamples *FS) const;
-  void clear() {
-    SampleCoverage.clear();
-    TotalUsedSamples = 0;
-  }
-
-private:
-  typedef std::map<LineLocation, unsigned> BodySampleCoverageMap;
-  typedef DenseMap<const FunctionSamples *, BodySampleCoverageMap>
-      FunctionSamplesCoverageMap;
-
-  /// Coverage map for sampling records.
-  ///
-  /// This map keeps a record of sampling records that have been matched to
-  /// an IR instruction. This is used to detect some form of staleness in
-  /// profiles (see flag -sample-profile-check-coverage).
-  ///
-  /// Each entry in the map corresponds to a FunctionSamples instance.  This is
-  /// another map that counts how many times the sample record at the
-  /// given location has been used.
-  FunctionSamplesCoverageMap SampleCoverage;
-
-  /// Number of samples used from the profile.
-  ///
-  /// When a sampling record is used for the first time, the samples from
-  /// that record are added to this accumulator.  Coverage is later computed
-  /// based on the total number of samples available in this function and
-  /// its callsites.
-  ///
-  /// Note that this accumulator tracks samples used from a single function
-  /// and all the inlined callsites. Strictly, we should have a map of counters
-  /// keyed by FunctionSamples pointers, but these stats are cleared after
-  /// every function, so we just need to keep a single counter.
-  uint64_t TotalUsedSamples;
-};
-
-SampleCoverageTracker CoverageTracker;
 
 /// Return true if the given callsite is hot wrt to its caller.
 ///
@@ -451,7 +452,7 @@ void SampleProfileLoader::printBlockWeight(raw_ostream &OS,
 ///
 /// \returns the weight of \p Inst.
 ErrorOr<uint64_t>
-SampleProfileLoader::getInstWeight(const Instruction &Inst) const {
+SampleProfileLoader::getInstWeight(const Instruction &Inst) {
   const DebugLoc &DLoc = Inst.getDebugLoc();
   if (!DLoc)
     return std::error_code();
@@ -466,12 +467,12 @@ SampleProfileLoader::getInstWeight(const Instruction &Inst) const {
   if (isa<BranchInst>(Inst) || isa<IntrinsicInst>(Inst))
     return std::error_code();
 
-  // If a call instruction is inlined in profile, but not inlined here,
+  // If a call/invoke instruction is inlined in profile, but not inlined here,
   // it means that the inlined callsite has no sample, thus the call
   // instruction should have 0 count.
-  const CallInst *CI = dyn_cast<CallInst>(&Inst);
-  if (CI && findCalleeFunctionSamples(*CI))
-    return 0; 
+  bool IsCall = isa<CallInst>(Inst) || isa<InvokeInst>(Inst);
+  if (IsCall && findCalleeFunctionSamples(Inst))
+    return 0;
 
   const DILocation *DIL = DLoc;
   unsigned Lineno = DLoc.getLine();
@@ -479,7 +480,9 @@ SampleProfileLoader::getInstWeight(const Instruction &Inst) const {
 
   uint32_t LineOffset = getOffset(Lineno, HeaderLineno);
   uint32_t Discriminator = DIL->getDiscriminator();
-  ErrorOr<uint64_t> R = FS->findSamplesAt(LineOffset, Discriminator);
+  ErrorOr<uint64_t> R = IsCall
+                            ? FS->findCallSamplesAt(LineOffset, Discriminator)
+                            : FS->findSamplesAt(LineOffset, Discriminator);
   if (R) {
     bool FirstMark =
         CoverageTracker.markSamplesUsed(FS, LineOffset, Discriminator, R.get());
@@ -509,23 +512,17 @@ SampleProfileLoader::getInstWeight(const Instruction &Inst) const {
 ///
 /// \returns the weight for \p BB.
 ErrorOr<uint64_t>
-SampleProfileLoader::getBlockWeight(const BasicBlock *BB) const {
-  DenseMap<uint64_t, uint64_t> CM;
+SampleProfileLoader::getBlockWeight(const BasicBlock *BB) {
+  uint64_t Max = 0;
+  bool HasWeight = false;
   for (auto &I : BB->getInstList()) {
     const ErrorOr<uint64_t> &R = getInstWeight(I);
-    if (R) CM[R.get()]++;
-  }
-  if (CM.size() == 0) return std::error_code();
-  uint64_t W = 0, C = 0;
-  for (const auto &C_W : CM) {
-    if (C_W.second == W) {
-      C = std::max(C, C_W.first);
-    } else if (C_W.second > W) {
-      C = C_W.first;
-      W = C_W.second;
+    if (R) {
+      Max = std::max(Max, R.get());
+      HasWeight = true;
     }
   }
-  return C;
+  return HasWeight ? ErrorOr<uint64_t>(Max) : std::error_code();
 }
 
 /// \brief Compute and store the weights of every basic block.
@@ -552,18 +549,18 @@ bool SampleProfileLoader::computeBlockWeights(Function &F) {
 
 /// \brief Get the FunctionSamples for a call instruction.
 ///
-/// The FunctionSamples of a call instruction \p Inst is the inlined
+/// The FunctionSamples of a call/invoke instruction \p Inst is the inlined
 /// instance in which that call instruction is calling to. It contains
 /// all samples that resides in the inlined instance. We first find the
 /// inlined instance in which the call instruction is from, then we
 /// traverse its children to find the callsite with the matching
-/// location and callee function name.
+/// location.
 ///
-/// \param Inst Call instruction to query.
+/// \param Inst Call/Invoke instruction to query.
 ///
 /// \returns The FunctionSamples pointer to the inlined instance.
 const FunctionSamples *
-SampleProfileLoader::findCalleeFunctionSamples(const CallInst &Inst) const {
+SampleProfileLoader::findCalleeFunctionSamples(const Instruction &Inst) const {
   const DILocation *DIL = Inst.getDebugLoc();
   if (!DIL) {
     return nullptr;
@@ -612,7 +609,6 @@ SampleProfileLoader::findFunctionSamples(const Instruction &Inst) const {
   return FS;
 }
 
-
 /// \brief Iteratively inline hot callsites of a function.
 ///
 /// Iteratively traverse all callsites of the function \p F, and find if
@@ -632,20 +628,32 @@ bool SampleProfileLoader::inlineHotFunctions(Function &F) {
       Function &F) -> AssumptionCache & { return ACT->getAssumptionCache(F); };
   while (true) {
     bool LocalChanged = false;
-    SmallVector<CallInst *, 10> CIS;
+    SmallVector<Instruction *, 10> CIS;
     for (auto &BB : F) {
+      bool Hot = false;
+      SmallVector<Instruction *, 10> Candidates;
       for (auto &I : BB.getInstList()) {
-        CallInst *CI = dyn_cast<CallInst>(&I);
-        if (CI && callsiteIsHot(Samples, findCalleeFunctionSamples(*CI)))
-          CIS.push_back(CI);
+        const FunctionSamples *FS = nullptr;
+        if ((isa<CallInst>(I) || isa<InvokeInst>(I)) &&
+            (FS = findCalleeFunctionSamples(I))) {
+          Candidates.push_back(&I);
+          if (callsiteIsHot(Samples, FS))
+            Hot = true;
+        }
+      }
+      if (Hot) {
+        CIS.insert(CIS.begin(), Candidates.begin(), Candidates.end());
       }
     }
-    for (auto CI : CIS) {
+    for (auto I : CIS) {
       InlineFunctionInfo IFI(nullptr, ACT ? &GetAssumptionCache : nullptr);
-      Function *CalledFunction = CI->getCalledFunction();
-      DebugLoc DLoc = CI->getDebugLoc();
-      uint64_t NumSamples = findCalleeFunctionSamples(*CI)->getTotalSamples();
-      if (InlineFunction(CI, IFI)) {
+      CallSite CS(I);
+      Function *CalledFunction = CS.getCalledFunction();
+      if (!CalledFunction || !CalledFunction->getSubprogram())
+        continue;
+      DebugLoc DLoc = I->getDebugLoc();
+      uint64_t NumSamples = findCalleeFunctionSamples(*I)->getTotalSamples();
+      if (InlineFunction(CS, IFI)) {
         LocalChanged = true;
         emitOptimizationRemark(Ctx, DEBUG_TYPE, F, DLoc,
                                Twine("inlined hot callee '") +
@@ -1067,7 +1075,7 @@ void SampleProfileLoader::propagateWeights(Function &F) {
           if (!dyn_cast<IntrinsicInst>(&I)) {
             SmallVector<uint32_t, 1> Weights;
             Weights.push_back(BlockWeights[BB]);
-            CI->setMetadata(LLVMContext::MD_prof, 
+            CI->setMetadata(LLVMContext::MD_prof,
                             MDB.createBranchWeights(Weights));
           }
         }
@@ -1109,17 +1117,21 @@ void SampleProfileLoader::propagateWeights(Function &F) {
 
     // Only set weights if there is at least one non-zero weight.
     // In any other case, let the analyzer set weights.
-    DEBUG(dbgs() << "SUCCESS. Found non-zero weights.\n");
-    TI->setMetadata(llvm::LLVMContext::MD_prof,
-                    MDB.createBranchWeights(Weights));
-    DebugLoc BranchLoc = TI->getDebugLoc();
-    emitOptimizationRemark(
-        Ctx, DEBUG_TYPE, F, MaxDestLoc,
-        Twine("most popular destination for conditional branches at ") +
-            ((BranchLoc) ? Twine(BranchLoc->getFilename() + ":" +
-                                 Twine(BranchLoc.getLine()) + ":" +
-                                 Twine(BranchLoc.getCol()))
-                         : Twine("<UNKNOWN LOCATION>")));
+    if (MaxWeight > 0) {
+      DEBUG(dbgs() << "SUCCESS. Found non-zero weights.\n");
+      TI->setMetadata(llvm::LLVMContext::MD_prof,
+                      MDB.createBranchWeights(Weights));
+      DebugLoc BranchLoc = TI->getDebugLoc();
+      emitOptimizationRemark(
+          Ctx, DEBUG_TYPE, F, MaxDestLoc,
+          Twine("most popular destination for conditional branches at ") +
+              ((BranchLoc) ? Twine(BranchLoc->getFilename() + ":" +
+                                   Twine(BranchLoc.getLine()) + ":" +
+                                   Twine(BranchLoc.getCol()))
+                           : Twine("<UNKNOWN LOCATION>")));
+    } else {
+      DEBUG(dbgs() << "SKIPPED. All branch weights are zero.\n");
+    }
   }
 }
 
@@ -1263,10 +1275,10 @@ bool SampleProfileLoader::emitAnnotations(Function &F) {
 
 char SampleProfileLoaderLegacyPass::ID = 0;
 INITIALIZE_PASS_BEGIN(SampleProfileLoaderLegacyPass, "sample-profile",
-                "Sample Profile loader", false, false)
+                      "Sample Profile loader", false, false)
 INITIALIZE_PASS_DEPENDENCY(AssumptionCacheTracker)
 INITIALIZE_PASS_END(SampleProfileLoaderLegacyPass, "sample-profile",
-                "Sample Profile loader", false, false)
+                    "Sample Profile loader", false, false)
 
 bool SampleProfileLoader::doInitialization(Module &M) {
   auto &Ctx = M.getContext();
@@ -1303,12 +1315,13 @@ bool SampleProfileLoader::runOnModule(Module &M) {
       clearFunctionData();
       retval |= runOnFunction(F);
     }
-  M.setProfileSummary(Reader->getSummary().getMD(M.getContext()));
+  if (M.getProfileSummary() == nullptr)
+    M.setProfileSummary(Reader->getSummary().getMD(M.getContext()));
   return retval;
 }
 
 bool SampleProfileLoaderLegacyPass::runOnModule(Module &M) {
-  // FIXME: pass in AssumptionCache correctly for the new pass manager. 
+  // FIXME: pass in AssumptionCache correctly for the new pass manager.
   SampleLoader.setACT(&getAnalysis<AssumptionCacheTracker>());
   return SampleLoader.runOnModule(M);
 }

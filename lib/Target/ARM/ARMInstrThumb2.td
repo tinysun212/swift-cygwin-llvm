@@ -2038,6 +2038,7 @@ def : Thumb2ExtractPat<(add rGPR:$Rn, (and (srl rGPR:$Rm, imm8_or_16:$rot),
 //  Arithmetic Instructions.
 //
 
+let isAdd = 1 in
 defm t2ADD  : T2I_bin_ii12rs<0b000, "add", add, 1>;
 defm t2SUB  : T2I_bin_ii12rs<0b101, "sub", sub>;
 
@@ -3380,7 +3381,9 @@ def t2B   : T2I<(outs), (ins thumb_br_target:$target), IIC_Br,
 }
 
 let Size = 4, isNotDuplicable = 1, isIndirectBranch = 1 in {
-def t2BR_JT : t2PseudoInst<(outs),
+
+// available in both v8-M.Baseline and Thumb2 targets
+def t2BR_JT : t2basePseudoInst<(outs),
           (ins GPR:$target, GPR:$index, i32imm:$jt),
            0, IIC_Br,
           [(ARMbr2jt GPR:$target, GPR:$index, tjumptable:$jt)]>,
@@ -4406,7 +4409,7 @@ def : t2InstAlias<"ldrsh${p} $Rt, $addr",
                   (t2LDRSHs rGPR:$Rt, t2addrmode_so_reg:$addr, pred:$p)>;
 
 def : t2InstAlias<"ldr${p} $Rt, $addr",
-                  (t2LDRpci GPRnopc:$Rt, t2ldrlabel:$addr, pred:$p)>;
+                  (t2LDRpci GPR:$Rt, t2ldrlabel:$addr, pred:$p)>;
 def : t2InstAlias<"ldrb${p} $Rt, $addr",
                   (t2LDRBpci rGPR:$Rt, t2ldrlabel:$addr, pred:$p)>;
 def : t2InstAlias<"ldrh${p} $Rt, $addr",
@@ -4657,6 +4660,10 @@ def : t2InstAlias<"add${p} $Rd, pc, $imm",
 def t2LDRConstPool
   : t2AsmPseudo<"ldr${p} $Rt, $immediate",
                 (ins GPRnopc:$Rt, const_pool_asm_imm:$immediate, pred:$p)>;
+// Version w/ the .w suffix.
+def : t2InstAlias<"ldr${p}.w $Rt, $immediate",
+                  (t2LDRConstPool GPRnopc:$Rt,
+                  const_pool_asm_imm:$immediate, pred:$p)>;
 
 // PLD/PLDW/PLI with alternate literal form.
 def : t2InstAlias<"pld${p} $addr",

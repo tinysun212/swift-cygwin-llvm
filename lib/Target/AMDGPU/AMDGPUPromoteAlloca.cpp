@@ -76,9 +76,7 @@ public:
   bool doInitialization(Module &M) override;
   bool runOnFunction(Function &F) override;
 
-  const char *getPassName() const override {
-    return "AMDGPU Promote Alloca";
-  }
+  StringRef getPassName() const override { return "AMDGPU Promote Alloca"; }
 
   void handleAlloca(AllocaInst &I);
 
@@ -184,13 +182,12 @@ bool AMDGPUPromoteAlloca::runOnFunction(Function &F) {
 
   // TODO: Have some sort of hint or other heuristics to guess occupancy based
   // on other factors..
-  unsigned OccupancyHint
-    = AMDGPU::getIntegerAttribute(F, "amdgpu-max-waves-per-eu", 0);
+  unsigned OccupancyHint = ST.getWavesPerEU(F).second;
   if (OccupancyHint == 0)
     OccupancyHint = 7;
 
   // Clamp to max value.
-  OccupancyHint = std::min(OccupancyHint, ST.getMaxWavesPerCU());
+  OccupancyHint = std::min(OccupancyHint, ST.getMaxWavesPerEU());
 
   // Check the hint but ignore it if it's obviously wrong from the existing LDS
   // usage.
@@ -582,6 +579,12 @@ bool AMDGPUPromoteAlloca::collectUsesWithPtrTypes(
       WorkList.push_back(ICmp);
     }
 
+    if (UseInst->getOpcode() == Instruction::AddrSpaceCast) {
+      // Don't collect the users of this.
+      WorkList.push_back(User);
+      continue;
+    }
+
     if (!User->getType()->isPointerTy())
       continue;
 
@@ -650,9 +653,11 @@ void AMDGPUPromoteAlloca::handleAlloca(AllocaInst &I) {
   if (AMDGPU::isShader(ContainingFunction.getCallingConv()))
     return;
 
+  const AMDGPUSubtarget &ST =
+    TM->getSubtarget<AMDGPUSubtarget>(ContainingFunction);
   // FIXME: We should also try to get this value from the reqd_work_group_size
   // function attribute if it is available.
-  unsigned WorkGroupSize = AMDGPU::getMaximumWorkGroupSize(ContainingFunction);
+  unsigned WorkGroupSize = ST.getFlatWorkGroupSizes(ContainingFunction).second;
 
   const DataLayout &DL = Mod->getDataLayout();
 
@@ -740,7 +745,8 @@ void AMDGPUPromoteAlloca::handleAlloca(AllocaInst &I) {
         continue;
       }
 
-      // The operand's value should be corrected on its own.
+      // The operand's value should be corrected on its own and we don't want to
+      // touch the users.
       if (isa<AddrSpaceCastInst>(V))
         continue;
 

@@ -63,6 +63,7 @@ std::unique_ptr<MappedBlockStream>
 MappedBlockStream::createIndexedStream(const MSFLayout &Layout,
                                        const ReadableStream &MsfData,
                                        uint32_t StreamIndex) {
+  assert(StreamIndex < Layout.StreamMap.size() && "Invalid stream index");
   MSFStreamLayout SL;
   SL.Blocks = Layout.StreamMap[StreamIndex];
   SL.Length = Layout.StreamSizes[StreamIndex];
@@ -200,6 +201,10 @@ uint32_t MappedBlockStream::getLength() const { return StreamLayout.Length; }
 
 bool MappedBlockStream::tryReadContiguously(uint32_t Offset, uint32_t Size,
                                             ArrayRef<uint8_t> &Buffer) const {
+  if (Size == 0) {
+    Buffer = ArrayRef<uint8_t>();
+    return true;
+  }
   // Attempt to fulfill the request with a reference directly into the stream.
   // This can work even if the request crosses a block boundary, provided that
   // all subsequent blocks are contiguous.  For example, a 10k read with a 4k
@@ -330,6 +335,7 @@ std::unique_ptr<WritableMappedBlockStream>
 WritableMappedBlockStream::createIndexedStream(const MSFLayout &Layout,
                                                const WritableStream &MsfData,
                                                uint32_t StreamIndex) {
+  assert(StreamIndex < Layout.StreamMap.size() && "Invalid stream index");
   MSFStreamLayout SL;
   SL.Blocks = Layout.StreamMap[StreamIndex];
   SL.Length = Layout.StreamSizes[StreamIndex];

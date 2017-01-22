@@ -84,6 +84,24 @@ static inline bool IsFreeToInvert(Value *V, bool WillInvertAllUses) {
   if (isa<ConstantInt>(V))
     return true;
 
+  // A vector of constant integers can be inverted easily.
+  Constant *CV;
+  if (V->getType()->isVectorTy() && match(V, PatternMatch::m_Constant(CV))) {
+    unsigned NumElts = V->getType()->getVectorNumElements();
+    for (unsigned i = 0; i != NumElts; ++i) {
+      Constant *Elt = CV->getAggregateElement(i);
+      if (!Elt)
+        return false;
+
+      if (isa<UndefValue>(Elt))
+        continue;
+
+      if (!isa<ConstantInt>(Elt))
+        return false;
+    }
+    return true;
+  }
+
   // Compares can be inverted if all of their uses are being modified to use the
   // ~V.
   if (isa<CmpInst>(V))
@@ -138,8 +156,7 @@ IntrinsicIDToOverflowCheckFlavor(unsigned ID) {
 /// \brief The core instruction combiner logic.
 ///
 /// This class provides both the logic to recursively visit instructions and
-/// combine them, as well as the pass infrastructure for running this as part
-/// of the LLVM pass pipeline.
+/// combine them.
 class LLVM_LIBRARY_VISIBILITY InstCombiner
     : public InstVisitor<InstCombiner, Instruction *> {
   // FIXME: These members shouldn't be public.
@@ -258,14 +275,8 @@ public:
   Instruction *visitIntToPtr(IntToPtrInst &CI);
   Instruction *visitBitCast(BitCastInst &CI);
   Instruction *visitAddrSpaceCast(AddrSpaceCastInst &CI);
-  Instruction *FoldSelectOpOp(SelectInst &SI, Instruction *TI, Instruction *FI);
-  Instruction *FoldSelectIntoOp(SelectInst &SI, Value *, Value *);
-  Instruction *FoldSPFofSPF(Instruction *Inner, SelectPatternFlavor SPF1,
-                            Value *A, Value *B, Instruction &Outer,
-                            SelectPatternFlavor SPF2, Value *C);
   Instruction *FoldItoFPtoI(Instruction &FI);
   Instruction *visitSelectInst(SelectInst &SI);
-  Instruction *visitSelectInstWithICmp(SelectInst &SI, ICmpInst *ICI);
   Instruction *visitCallInst(CallInst &CI);
   Instruction *visitInvokeInst(InvokeInst &II);
 
@@ -289,16 +300,16 @@ public:
   Instruction *visitVAStartInst(VAStartInst &I);
   Instruction *visitVACopyInst(VACopyInst &I);
 
-  // visitInstruction - Specify what to return for unhandled instructions...
+  /// Specify what to return for unhandled instructions.
   Instruction *visitInstruction(Instruction &I) { return nullptr; }
 
-  // True when DB dominates all uses of DI execpt UI.
-  // UI must be in the same block as DI.
-  // The routine checks that the DI parent and DB are different.
+  /// True when DB dominates all uses of DI except UI.
+  /// UI must be in the same block as DI.
+  /// The routine checks that the DI parent and DB are different.
   bool dominatesAllUses(const Instruction *DI, const Instruction *UI,
                         const BasicBlock *DB) const;
 
-  // Replace select with select operand SIOpd in SI-ICmp sequence when possible
+  /// Try to replace select with select operand SIOpd in SI-ICmp sequence.
   bool replacedSelectWithOperand(SelectInst *SI, const ICmpInst *Icmp,
                                  const unsigned SIOpd);
 
@@ -309,7 +320,6 @@ private:
   Value *dyn_castFNegVal(Value *V, bool NoSignedZero = false) const;
   Type *FindElementAtOffset(PointerType *PtrTy, int64_t Offset,
                             SmallVectorImpl<Value *> &NewIndices);
-  Instruction *FoldOpIntoSelect(Instruction &Op, SelectInst *SI);
 
   /// Classify whether a cast is worth optimizing.
   ///
@@ -368,6 +378,8 @@ private:
   Instruction *scalarizePHI(ExtractElementInst &EI, PHINode *PN);
   Value *EvaluateInDifferentElementOrder(Value *V, ArrayRef<int> Mask);
   Instruction *foldCastedBitwiseLogic(BinaryOperator &I);
+  Instruction *shrinkBitwiseLogic(TruncInst &Trunc);
+  Instruction *optimizeBitCastFromPhi(CastInst &CI, PHINode *PN);
 
   /// Determine if a pair of casts can be replaced by a single cast.
   ///
@@ -524,12 +536,20 @@ private:
   Value *SimplifyVectorOp(BinaryOperator &Inst);
   Value *SimplifyBSwap(BinaryOperator &Inst);
 
-  // FoldOpIntoPhi - Given a binary operator, cast instruction, or select
-  // which has a PHI node as operand #0, see if we can fold the instruction
-  // into the PHI (which is only possible if all operands to the PHI are
-  // constants).
-  //
+
+  /// Given a binary operator, cast instruction, or select which has a PHI node
+  /// as operand #0, see if we can fold the instruction into the PHI (which is
+  /// only possible if all operands to the PHI are constants).
   Instruction *FoldOpIntoPhi(Instruction &I);
+
+  /// Given an instruction with a select as one operand and a constant as the
+  /// other operand, try to fold the binary operator into the select arguments.
+  /// This also works for Cast instructions, which obviously do not have a
+  /// second operand.
+  Instruction *FoldOpIntoSelect(Instruction &Op, SelectInst *SI);
+
+  /// This is a convenience wrapper function for the above two functions.
+  Instruction *foldOpWithConstantIntoOperand(Instruction &I);
 
   /// \brief Try to rotate an operation below a PHI node, using PHI nodes for
   /// its operands.
@@ -538,6 +558,10 @@ private:
   Instruction *FoldPHIArgGEPIntoPHI(PHINode &PN);
   Instruction *FoldPHIArgLoadIntoPHI(PHINode &PN);
   Instruction *FoldPHIArgZextsIntoPHI(PHINode &PN);
+
+  /// Helper function for FoldPHIArgXIntoPHI() to get debug location for the
+  /// folded operation.
+  DebugLoc PHIArgMergedDebugLoc(PHINode &PN);
 
   Instruction *foldGEPICmp(GEPOperator *GEPLHS, Value *RHS,
                            ICmpInst::Predicate Cond, Instruction &I);
@@ -548,52 +572,69 @@ private:
                                             ConstantInt *AndCst = nullptr);
   Instruction *foldFCmpIntToFPConst(FCmpInst &I, Instruction *LHSI,
                                     Constant *RHSC);
-  Instruction *foldICmpDivConstConst(ICmpInst &ICI, BinaryOperator *DivI,
-                                     ConstantInt *DivRHS);
-  Instruction *foldICmpShrConstConst(ICmpInst &ICI, BinaryOperator *DivI,
-                                     ConstantInt *DivRHS);
-  Instruction *foldICmpCstShrConst(ICmpInst &I, Value *Op, Value *A,
-                                   ConstantInt *CI1, ConstantInt *CI2);
-  Instruction *foldICmpCstShlConst(ICmpInst &I, Value *Op, Value *A,
-                                   ConstantInt *CI1, ConstantInt *CI2);
   Instruction *foldICmpAddOpConst(Instruction &ICI, Value *X, ConstantInt *CI,
                                   ICmpInst::Predicate Pred);
   Instruction *foldICmpWithCastAndCast(ICmpInst &ICI);
-  Instruction *foldICmpWithConstant(ICmpInst &ICI);
 
-  Instruction *foldICmpTruncConstant(ICmpInst &ICI, Instruction *LHSI,
-                                     const APInt *RHSV);
-  Instruction *foldICmpAndConstant(ICmpInst &ICI, Instruction *LHSI,
-                                   const APInt *RHSV);
-  Instruction *foldICmpXorConstant(ICmpInst &ICI, Instruction *LHSI,
-                                   const APInt *RHSV);
-  Instruction *foldICmpOrConstant(ICmpInst &ICI, Instruction *LHSI,
-                                  const APInt *RHSV);
-  Instruction *foldICmpMulConstant(ICmpInst &ICI, Instruction *LHSI,
-                                   const APInt *RHSV);
-  Instruction *foldICmpShlConstant(ICmpInst &ICI, Instruction *LHSI,
-                                   const APInt *RHSV);
-  Instruction *foldICmpShrConstant(ICmpInst &ICI, Instruction *LHSI,
-                                   const APInt *RHSV);
-  Instruction *foldICmpUDivConstant(ICmpInst &ICI, Instruction *LHSI,
-                                    const APInt *RHSV);
-  Instruction *foldICmpDivConstant(ICmpInst &ICI, Instruction *LHSI,
-                                   const APInt *RHSV);
-  Instruction *foldICmpSubConstant(ICmpInst &ICI, Instruction *LHSI,
-                                   const APInt *RHSV);
-  Instruction *foldICmpAddConstant(ICmpInst &ICI, Instruction *LHSI,
-                                   const APInt *RHSV);
+  Instruction *foldICmpUsingKnownBits(ICmpInst &Cmp);
+  Instruction *foldICmpWithConstant(ICmpInst &Cmp);
+  Instruction *foldICmpInstWithConstant(ICmpInst &Cmp);
+  Instruction *foldICmpInstWithConstantNotInt(ICmpInst &Cmp);
+  Instruction *foldICmpBinOp(ICmpInst &Cmp);
+  Instruction *foldICmpEquality(ICmpInst &Cmp);
 
-  Instruction *foldICmpEqualityWithConstant(ICmpInst &ICI);
-  Instruction *foldICmpIntrinsicWithConstant(ICmpInst &ICI);
+  Instruction *foldICmpTruncConstant(ICmpInst &Cmp, Instruction *Trunc,
+                                     const APInt *C);
+  Instruction *foldICmpAndConstant(ICmpInst &Cmp, BinaryOperator *And,
+                                   const APInt *C);
+  Instruction *foldICmpXorConstant(ICmpInst &Cmp, BinaryOperator *Xor,
+                                   const APInt *C);
+  Instruction *foldICmpOrConstant(ICmpInst &Cmp, BinaryOperator *Or,
+                                  const APInt *C);
+  Instruction *foldICmpMulConstant(ICmpInst &Cmp, BinaryOperator *Mul,
+                                   const APInt *C);
+  Instruction *foldICmpShlConstant(ICmpInst &Cmp, BinaryOperator *Shl,
+                                   const APInt *C);
+  Instruction *foldICmpShrConstant(ICmpInst &Cmp, BinaryOperator *Shr,
+                                   const APInt *C);
+  Instruction *foldICmpUDivConstant(ICmpInst &Cmp, BinaryOperator *UDiv,
+                                    const APInt *C);
+  Instruction *foldICmpDivConstant(ICmpInst &Cmp, BinaryOperator *Div,
+                                   const APInt *C);
+  Instruction *foldICmpSubConstant(ICmpInst &Cmp, BinaryOperator *Sub,
+                                   const APInt *C);
+  Instruction *foldICmpAddConstant(ICmpInst &Cmp, BinaryOperator *Add,
+                                   const APInt *C);
+  Instruction *foldICmpAndConstConst(ICmpInst &Cmp, BinaryOperator *And,
+                                     const APInt *C1);
+  Instruction *foldICmpAndShift(ICmpInst &Cmp, BinaryOperator *And,
+                                const APInt *C1, const APInt *C2);
+  Instruction *foldICmpShrConstConst(ICmpInst &I, Value *ShAmt, const APInt &C1,
+                                     const APInt &C2);
+  Instruction *foldICmpShlConstConst(ICmpInst &I, Value *ShAmt, const APInt &C1,
+                                     const APInt &C2);
+
+  Instruction *foldICmpBinOpEqualityWithConstant(ICmpInst &Cmp,
+                                                 BinaryOperator *BO,
+                                                 const APInt *C);
+  Instruction *foldICmpIntrinsicWithConstant(ICmpInst &ICI, const APInt *C);
+
+  // Helpers of visitSelectInst().
+  Instruction *foldSelectExtConst(SelectInst &Sel);
+  Instruction *foldSelectOpOp(SelectInst &SI, Instruction *TI, Instruction *FI);
+  Instruction *foldSelectIntoOp(SelectInst &SI, Value *, Value *);
+  Instruction *foldSPFofSPF(Instruction *Inner, SelectPatternFlavor SPF1,
+                            Value *A, Value *B, Instruction &Outer,
+                            SelectPatternFlavor SPF2, Value *C);
+  Instruction *foldSelectInstWithICmp(SelectInst &SI, ICmpInst *ICI);
 
   Instruction *OptAndOp(Instruction *Op, ConstantInt *OpRHS,
                         ConstantInt *AndRHS, BinaryOperator &TheAnd);
 
   Value *FoldLogicalPlusAnd(Value *LHS, Value *RHS, ConstantInt *Mask,
                             bool isSub, Instruction &I);
-  Value *InsertRangeTest(Value *V, Constant *Lo, Constant *Hi, bool isSigned,
-                         bool Inside);
+  Value *insertRangeTest(Value *V, const APInt &Lo, const APInt &Hi,
+                         bool isSigned, bool Inside);
   Instruction *PromoteCastOfAllocation(BitCastInst &CI, AllocaInst &AI);
   Instruction *MatchBSwap(BinaryOperator &I);
   bool SimplifyStoreAtEndOfBlock(StoreInst &SI);

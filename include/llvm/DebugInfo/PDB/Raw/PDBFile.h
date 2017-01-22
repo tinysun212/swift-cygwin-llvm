@@ -26,11 +26,11 @@ namespace llvm {
 
 namespace msf {
 class MappedBlockStream;
-class WritableStream;
 }
 
 namespace pdb {
 class DbiStream;
+class GlobalsStream;
 class InfoStream;
 class NameHashTable;
 class PDBFileBuilder;
@@ -86,13 +86,29 @@ public:
 
   Expected<InfoStream &> getPDBInfoStream();
   Expected<DbiStream &> getPDBDbiStream();
+  Expected<GlobalsStream &> getPDBGlobalsStream();
   Expected<TpiStream &> getPDBTpiStream();
   Expected<TpiStream &> getPDBIpiStream();
   Expected<PublicsStream &> getPDBPublicsStream();
   Expected<SymbolStream &> getPDBSymbolStream();
   Expected<NameHashTable &> getStringTable();
 
-private:
+  BumpPtrAllocator &getAllocator() { return Allocator; }
+
+  bool hasPDBDbiStream() const;
+  bool hasPDBGlobalsStream();
+  bool hasPDBInfoStream();
+  bool hasPDBIpiStream() const;
+  bool hasPDBPublicsStream();
+  bool hasPDBSymbolStream();
+  bool hasPDBTpiStream() const;
+  bool hasStringTable();
+
+ private:
+  Expected<std::unique_ptr<msf::MappedBlockStream>> safelyCreateIndexedStream(
+      const msf::MSFLayout &Layout, const msf::ReadableStream &MsfData,
+      uint32_t StreamIndex) const;
+
   BumpPtrAllocator &Allocator;
 
   std::unique_ptr<msf::ReadableStream> Buffer;
@@ -100,6 +116,7 @@ private:
   std::vector<uint32_t> FpmPages;
   msf::MSFLayout ContainerLayout;
 
+  std::unique_ptr<GlobalsStream> Globals;
   std::unique_ptr<InfoStream> Info;
   std::unique_ptr<DbiStream> Dbi;
   std::unique_ptr<TpiStream> Tpi;

@@ -14,11 +14,11 @@
 #ifndef LLVM_LIB_TARGET_HEXAGON_MCTARGETDESC_HEXAGONMCTARGETDESC_H
 #define LLVM_LIB_TARGET_HEXAGON_MCTARGETDESC_HEXAGONMCTARGETDESC_H
 
+#include "llvm/Support/CommandLine.h"
 #include <cstdint>
 
-#include "llvm/Support/CommandLine.h"
-
 namespace llvm {
+
 struct InstrItinerary;
 struct InstrStage;
 class MCAsmBackend;
@@ -35,7 +35,7 @@ class StringRef;
 class raw_ostream;
 class raw_pwrite_stream;
 
-extern Target TheHexagonTarget;
+Target &getTheHexagonTarget();
 extern cl::opt<bool> HexagonDisableCompound;
 extern cl::opt<bool> HexagonDisableDuplex;
 extern const InstrStage HexagonStages[];
@@ -54,11 +54,13 @@ MCAsmBackend *createHexagonAsmBackend(const Target &T,
 MCObjectWriter *createHexagonELFObjectWriter(raw_pwrite_stream &OS,
                                              uint8_t OSABI, StringRef CPU);
 
-namespace HEXAGON_MC {
-  StringRef selectHexagonCPU(const Triple &TT, StringRef CPU);
-}
+namespace Hexagon_MC {
 
-} // End llvm namespace
+  StringRef selectHexagonCPU(const Triple &TT, StringRef CPU);
+
+} // end namespace Hexagon_MC
+
+} // end namespace llvm
 
 // Define symbolic names for Hexagon registers.  This defines a mapping from
 // register name to register number.
@@ -74,4 +76,4 @@ namespace HEXAGON_MC {
 #define GET_SUBTARGETINFO_ENUM
 #include "HexagonGenSubtargetInfo.inc"
 
-#endif
+#endif // LLVM_LIB_TARGET_HEXAGON_MCTARGETDESC_HEXAGONMCTARGETDESC_H

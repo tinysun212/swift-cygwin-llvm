@@ -35,6 +35,7 @@ class MachineBasicBlock;
 class MachineFunction;
 class MachineInstr;
 class MachineRegisterInfo;
+class TargetPassConfig;
 
 // Technically the pass should run on an hypothetical MachineModule,
 // since it should translate Global into some sort of MachineGlobal.
@@ -73,12 +74,16 @@ private:
   // in once all MachineBasicBlocks have been created.
   SmallVector<std::pair<const PHINode *, MachineInstr *>, 4> PendingPHIs;
 
+  /// Record of what frame index has been allocated to specified allocas for
+  /// this function.
+  DenseMap<const AllocaInst *, int> FrameIndices;
+
   /// Methods for translating form LLVM IR to MachineInstr.
   /// \see ::translate for general information on the translate methods.
   /// @{
 
   /// Translate \p Inst into its corresponding MachineInstr instruction(s).
-  /// Insert the newly translated instruction(s) right where the MIRBuilder
+  /// Insert the newly translated instruction(s) right where the CurBuilder
   /// is set.
   ///
   /// The general algorithm is:
@@ -109,28 +114,58 @@ private:
 
   /// Translate an LLVM bitcast into generic IR. Either a COPY or a G_BITCAST is
   /// emitted.
-  bool translateBitCast(const User &U);
+  bool translateBitCast(const User &U, MachineIRBuilder &MIRBuilder);
 
   /// Translate an LLVM load instruction into generic IR.
-  bool translateLoad(const User &U);
+  bool translateLoad(const User &U, MachineIRBuilder &MIRBuilder);
 
   /// Translate an LLVM store instruction into generic IR.
-  bool translateStore(const User &U);
+  bool translateStore(const User &U, MachineIRBuilder &MIRBuilder);
+
+  bool translateMemcpy(const CallInst &CI, MachineIRBuilder &MIRBuilder);
+
+  void getStackGuard(unsigned DstReg, MachineIRBuilder &MIRBuilder);
+
+  bool translateOverflowIntrinsic(const CallInst &CI, unsigned Op,
+                                  MachineIRBuilder &MIRBuilder);
+
+  bool translateKnownIntrinsic(const CallInst &CI, Intrinsic::ID ID,
+                               MachineIRBuilder &MIRBuilder);
 
   /// Translate call instruction.
   /// \pre \p U is a call instruction.
-  bool translateCall(const User &U);
+  bool translateCall(const User &U, MachineIRBuilder &MIRBuilder);
+
+  bool translateInvoke(const User &U, MachineIRBuilder &MIRBuilder);
+
+  bool translateLandingPad(const User &U, MachineIRBuilder &MIRBuilder);
 
   /// Translate one of LLVM's cast instructions into MachineInstrs, with the
   /// given generic Opcode.
-  bool translateCast(unsigned Opcode, const User &U);
+  bool translateCast(unsigned Opcode, const User &U,
+                     MachineIRBuilder &MIRBuilder);
 
   /// Translate static alloca instruction (i.e. one  of constant size and in the
   /// first basic block).
-  bool translateStaticAlloca(const AllocaInst &Inst);
+  bool translateStaticAlloca(const AllocaInst &Inst,
+                             MachineIRBuilder &MIRBuilder);
 
   /// Translate a phi instruction.
-  bool translatePHI(const User &U);
+  bool translatePHI(const User &U, MachineIRBuilder &MIRBuilder);
+
+  /// Translate a comparison (icmp or fcmp) instruction or constant.
+  bool translateCompare(const User &U, MachineIRBuilder &MIRBuilder);
+
+  /// Translate an integer compare instruction (or constant).
+  bool translateICmp(const User &U, MachineIRBuilder &MIRBuilder) {
+    return translateCompare(U, MIRBuilder);
+  }
+
+  /// Translate a floating-point compare instruction (or constant).
+  bool translateFCmp(const User &U, MachineIRBuilder &MIRBuilder) {
+    return translateCompare(U, MIRBuilder);
+  }
+
 
   /// Add remaining operands onto phis we've translated. Executed after all
   /// MachineBasicBlocks for the function have been created.
@@ -138,111 +173,180 @@ private:
 
   /// Translate \p Inst into a binary operation \p Opcode.
   /// \pre \p U is a binary operation.
-  bool translateBinaryOp(unsigned Opcode, const User &U);
+  bool translateBinaryOp(unsigned Opcode, const User &U,
+                         MachineIRBuilder &MIRBuilder);
 
   /// Translate branch (br) instruction.
   /// \pre \p U is a branch instruction.
-  bool translateBr(const User &U);
+  bool translateBr(const User &U, MachineIRBuilder &MIRBuilder);
+
+  bool translateSwitch(const User &U, MachineIRBuilder &MIRBuilder);
+
+  bool translateExtractValue(const User &U, MachineIRBuilder &MIRBuilder);
+
+  bool translateInsertValue(const User &U, MachineIRBuilder &MIRBuilder);
+
+  bool translateSelect(const User &U, MachineIRBuilder &MIRBuilder);
+
+  bool translateGetElementPtr(const User &U, MachineIRBuilder &MIRBuilder);
 
   /// Translate return (ret) instruction.
   /// The target needs to implement CallLowering::lowerReturn for
   /// this to succeed.
   /// \pre \p U is a return instruction.
-  bool translateRet(const User &U);
+  bool translateRet(const User &U, MachineIRBuilder &MIRBuilder);
 
-  bool translateAdd(const User &U) {
-    return translateBinaryOp(TargetOpcode::G_ADD, U);
+  bool translateAdd(const User &U, MachineIRBuilder &MIRBuilder) {
+    return translateBinaryOp(TargetOpcode::G_ADD, U, MIRBuilder);
   }
-  bool translateSub(const User &U) {
-    return translateBinaryOp(TargetOpcode::G_SUB, U);
+  bool translateSub(const User &U, MachineIRBuilder &MIRBuilder) {
+    return translateBinaryOp(TargetOpcode::G_SUB, U, MIRBuilder);
   }
-  bool translateAnd(const User &U) {
-    return translateBinaryOp(TargetOpcode::G_AND, U);
+  bool translateAnd(const User &U, MachineIRBuilder &MIRBuilder) {
+    return translateBinaryOp(TargetOpcode::G_AND, U, MIRBuilder);
   }
-  bool translateMul(const User &U) {
-    return translateBinaryOp(TargetOpcode::G_MUL, U);
+  bool translateMul(const User &U, MachineIRBuilder &MIRBuilder) {
+    return translateBinaryOp(TargetOpcode::G_MUL, U, MIRBuilder);
   }
-  bool translateOr(const User &U) {
-    return translateBinaryOp(TargetOpcode::G_OR, U);
+  bool translateOr(const User &U, MachineIRBuilder &MIRBuilder) {
+    return translateBinaryOp(TargetOpcode::G_OR, U, MIRBuilder);
   }
-  bool translateXor(const User &U) {
-    return translateBinaryOp(TargetOpcode::G_XOR, U);
-  }
-  bool translateAlloca(const User &U) {
-    return translateStaticAlloca(cast<AllocaInst>(U));
-  }
-  bool translateIntToPtr(const User &U) {
-    return translateCast(TargetOpcode::G_INTTOPTR, U);
-  }
-  bool translatePtrToInt(const User &U) {
-    return translateCast(TargetOpcode::G_PTRTOINT, U);
-  }
-  bool translateTrunc(const User &U) {
-    return translateCast(TargetOpcode::G_TRUNC, U);
-  }
-  bool translateUnreachable(const User &U) { return true; }
-
-  bool translateSExt(const User &U) {
-    return translateCast(TargetOpcode::G_SEXT, U);
+  bool translateXor(const User &U, MachineIRBuilder &MIRBuilder) {
+    return translateBinaryOp(TargetOpcode::G_XOR, U, MIRBuilder);
   }
 
-  bool translateZExt(const User &U) {
-    return translateCast(TargetOpcode::G_ZEXT, U);
+  bool translateUDiv(const User &U, MachineIRBuilder &MIRBuilder) {
+    return translateBinaryOp(TargetOpcode::G_UDIV, U, MIRBuilder);
+  }
+  bool translateSDiv(const User &U, MachineIRBuilder &MIRBuilder) {
+    return translateBinaryOp(TargetOpcode::G_SDIV, U, MIRBuilder);
+  }
+  bool translateURem(const User &U, MachineIRBuilder &MIRBuilder) {
+    return translateBinaryOp(TargetOpcode::G_UREM, U, MIRBuilder);
+  }
+  bool translateSRem(const User &U, MachineIRBuilder &MIRBuilder) {
+    return translateBinaryOp(TargetOpcode::G_SREM, U, MIRBuilder);
+  }
+  bool translateAlloca(const User &U, MachineIRBuilder &MIRBuilder) {
+    return translateStaticAlloca(cast<AllocaInst>(U), MIRBuilder);
+  }
+  bool translateIntToPtr(const User &U, MachineIRBuilder &MIRBuilder) {
+    return translateCast(TargetOpcode::G_INTTOPTR, U, MIRBuilder);
+  }
+  bool translatePtrToInt(const User &U, MachineIRBuilder &MIRBuilder) {
+    return translateCast(TargetOpcode::G_PTRTOINT, U, MIRBuilder);
+  }
+  bool translateTrunc(const User &U, MachineIRBuilder &MIRBuilder) {
+    return translateCast(TargetOpcode::G_TRUNC, U, MIRBuilder);
+  }
+  bool translateFPTrunc(const User &U, MachineIRBuilder &MIRBuilder) {
+    return translateCast(TargetOpcode::G_FPTRUNC, U, MIRBuilder);
+  }
+  bool translateFPExt(const User &U, MachineIRBuilder &MIRBuilder) {
+    return translateCast(TargetOpcode::G_FPEXT, U, MIRBuilder);
+  }
+  bool translateFPToUI(const User &U, MachineIRBuilder &MIRBuilder) {
+    return translateCast(TargetOpcode::G_FPTOUI, U, MIRBuilder);
+  }
+  bool translateFPToSI(const User &U, MachineIRBuilder &MIRBuilder) {
+    return translateCast(TargetOpcode::G_FPTOSI, U, MIRBuilder);
+  }
+  bool translateUIToFP(const User &U, MachineIRBuilder &MIRBuilder) {
+    return translateCast(TargetOpcode::G_UITOFP, U, MIRBuilder);
+  }
+  bool translateSIToFP(const User &U, MachineIRBuilder &MIRBuilder) {
+    return translateCast(TargetOpcode::G_SITOFP, U, MIRBuilder);
+  }
+  bool translateUnreachable(const User &U, MachineIRBuilder &MIRBuilder) {
+    return true;
+  }
+  bool translateSExt(const User &U, MachineIRBuilder &MIRBuilder) {
+    return translateCast(TargetOpcode::G_SEXT, U, MIRBuilder);
   }
 
-  bool translateShl(const User &U) {
-    return translateBinaryOp(TargetOpcode::G_SHL, U);
+  bool translateZExt(const User &U, MachineIRBuilder &MIRBuilder) {
+    return translateCast(TargetOpcode::G_ZEXT, U, MIRBuilder);
   }
-  bool translateLShr(const User &U) {
-    return translateBinaryOp(TargetOpcode::G_LSHR, U);
+
+  bool translateShl(const User &U, MachineIRBuilder &MIRBuilder) {
+    return translateBinaryOp(TargetOpcode::G_SHL, U, MIRBuilder);
   }
-  bool translateAShr(const User &U) {
-    return translateBinaryOp(TargetOpcode::G_ASHR, U);
+  bool translateLShr(const User &U, MachineIRBuilder &MIRBuilder) {
+    return translateBinaryOp(TargetOpcode::G_LSHR, U, MIRBuilder);
+  }
+  bool translateAShr(const User &U, MachineIRBuilder &MIRBuilder) {
+    return translateBinaryOp(TargetOpcode::G_ASHR, U, MIRBuilder);
+  }
+
+  bool translateFAdd(const User &U, MachineIRBuilder &MIRBuilder) {
+    return translateBinaryOp(TargetOpcode::G_FADD, U, MIRBuilder);
+  }
+  bool translateFSub(const User &U, MachineIRBuilder &MIRBuilder) {
+    return translateBinaryOp(TargetOpcode::G_FSUB, U, MIRBuilder);
+  }
+  bool translateFMul(const User &U, MachineIRBuilder &MIRBuilder) {
+    return translateBinaryOp(TargetOpcode::G_FMUL, U, MIRBuilder);
+  }
+  bool translateFDiv(const User &U, MachineIRBuilder &MIRBuilder) {
+    return translateBinaryOp(TargetOpcode::G_FDIV, U, MIRBuilder);
+  }
+  bool translateFRem(const User &U, MachineIRBuilder &MIRBuilder) {
+    return translateBinaryOp(TargetOpcode::G_FREM, U, MIRBuilder);
   }
 
   // Stubs to keep the compiler happy while we implement the rest of the
   // translation.
-  bool translateSwitch(const User &U) { return false; }
-  bool translateIndirectBr(const User &U) { return false; }
-  bool translateInvoke(const User &U) { return false; }
-  bool translateResume(const User &U) { return false; }
-  bool translateCleanupRet(const User &U) { return false; }
-  bool translateCatchRet(const User &U) { return false; }
-  bool translateCatchSwitch(const User &U) { return false; }
-  bool translateFAdd(const User &U) { return false; }
-  bool translateFSub(const User &U) { return false; }
-  bool translateFMul(const User &U) { return false; }
-  bool translateUDiv(const User &U) { return false; }
-  bool translateSDiv(const User &U) { return false; }
-  bool translateFDiv(const User &U) { return false; }
-  bool translateURem(const User &U) { return false; }
-  bool translateSRem(const User &U) { return false; }
-  bool translateFRem(const User &U) { return false; }
-  bool translateGetElementPtr(const User &U) { return false; }
-  bool translateFence(const User &U) { return false; }
-  bool translateAtomicCmpXchg(const User &U) { return false; }
-  bool translateAtomicRMW(const User &U) { return false; }
-  bool translateFPToUI(const User &U) { return false; }
-  bool translateFPToSI(const User &U) { return false; }
-  bool translateUIToFP(const User &U) { return false; }
-  bool translateSIToFP(const User &U) { return false; }
-  bool translateFPTrunc(const User &U) { return false; }
-  bool translateFPExt(const User &U) { return false; }
-  bool translateAddrSpaceCast(const User &U) { return false; }
-  bool translateCleanupPad(const User &U) { return false; }
-  bool translateCatchPad(const User &U) { return false; }
-  bool translateICmp(const User &U) { return false; }
-  bool translateFCmp(const User &U) { return false; }
-  bool translateSelect(const User &U) { return false; }
-  bool translateUserOp1(const User &U) { return false; }
-  bool translateUserOp2(const User &U) { return false; }
-  bool translateVAArg(const User &U) { return false; }
-  bool translateExtractElement(const User &U) { return false; }
-  bool translateInsertElement(const User &U) { return false; }
-  bool translateShuffleVector(const User &U) { return false; }
-  bool translateExtractValue(const User &U) { return false; }
-  bool translateInsertValue(const User &U) { return false; }
-  bool translateLandingPad(const User &U) { return false; }
+  bool translateIndirectBr(const User &U, MachineIRBuilder &MIRBuilder) {
+    return false;
+  }
+  bool translateResume(const User &U, MachineIRBuilder &MIRBuilder) {
+    return false;
+  }
+  bool translateCleanupRet(const User &U, MachineIRBuilder &MIRBuilder) {
+    return false;
+  }
+  bool translateCatchRet(const User &U, MachineIRBuilder &MIRBuilder) {
+    return false;
+  }
+  bool translateCatchSwitch(const User &U, MachineIRBuilder &MIRBuilder) {
+    return false;
+  }
+  bool translateFence(const User &U, MachineIRBuilder &MIRBuilder) {
+    return false;
+  }
+  bool translateAtomicCmpXchg(const User &U, MachineIRBuilder &MIRBuilder) {
+    return false;
+  }
+  bool translateAtomicRMW(const User &U, MachineIRBuilder &MIRBuilder) {
+    return false;
+  }
+  bool translateAddrSpaceCast(const User &U, MachineIRBuilder &MIRBuilder) {
+    return false;
+  }
+  bool translateCleanupPad(const User &U, MachineIRBuilder &MIRBuilder) {
+    return false;
+  }
+  bool translateCatchPad(const User &U, MachineIRBuilder &MIRBuilder) {
+    return false;
+  }
+  bool translateUserOp1(const User &U, MachineIRBuilder &MIRBuilder) {
+    return false;
+  }
+  bool translateUserOp2(const User &U, MachineIRBuilder &MIRBuilder) {
+    return false;
+  }
+  bool translateVAArg(const User &U, MachineIRBuilder &MIRBuilder) {
+    return false;
+  }
+  bool translateExtractElement(const User &U, MachineIRBuilder &MIRBuilder) {
+    return false;
+  }
+  bool translateInsertElement(const User &U, MachineIRBuilder &MIRBuilder) {
+    return false;
+  }
+  bool translateShuffleVector(const User &U, MachineIRBuilder &MIRBuilder) {
+    return false;
+  }
 
   /// @}
 
@@ -250,16 +354,22 @@ private:
   // I.e., compared to regular MIBuilder, this one also inserts the instruction
   // in the current block, it can creates block, etc., basically a kind of
   // IRBuilder, but for Machine IR.
-  MachineIRBuilder MIRBuilder;
+  MachineIRBuilder CurBuilder;
 
   // Builder set to the entry block (just after ABI lowering instructions). Used
   // as a convenient location for Constants.
   MachineIRBuilder EntryBuilder;
 
+  // The MachineFunction currently being translated.
+  MachineFunction *MF;
+
   /// MachineRegisterInfo used to create virtual registers.
   MachineRegisterInfo *MRI;
 
   const DataLayout *DL;
+
+  /// Current target configuration. Controls how the pass handles errors.
+  const TargetPassConfig *TPC;
 
   // * Insert all the code needed to materialize the constants
   // at the proper place. E.g., Entry block or dominator block
@@ -270,6 +380,10 @@ private:
   /// Get the VReg that represents \p Val.
   /// If such VReg does not exist, it is created.
   unsigned getOrCreateVReg(const Value &Val);
+
+  /// Get the frame index that represents \p Val.
+  /// If such VReg does not exist, it is created.
+  int getOrCreateFrameIndex(const AllocaInst &AI);
 
   /// Get the alignment of the given memory operation instruction. This will
   /// either be the explicitly specified value or the ABI-required alignment for
@@ -285,9 +399,9 @@ public:
   // Ctor, nothing fancy.
   IRTranslator();
 
-  const char *getPassName() const override {
-    return "IRTranslator";
-  }
+  StringRef getPassName() const override { return "IRTranslator"; }
+
+  void getAnalysisUsage(AnalysisUsage &AU) const override;
 
   // Algo:
   //   CallLowering = MF.subtarget.getCallLowering()

@@ -21,13 +21,13 @@ define <3 x double> @v3f2d_ext_vec(<3 x float> %v1) nounwind {
 ; SSE-LABEL: v3f2d_ext_vec:
 ; SSE:       # BB#0: # %entry
 ; SSE-NEXT:    cvtps2pd %xmm0, %xmm2
-; SSE-NEXT:    shufpd {{.*#+}} xmm0 = xmm0[1,0]
+; SSE-NEXT:    movhlps {{.*#+}} xmm0 = xmm0[1,1]
 ; SSE-NEXT:    cvtps2pd %xmm0, %xmm0
 ; SSE-NEXT:    movlps %xmm0, -{{[0-9]+}}(%rsp)
-; SSE-NEXT:    movapd %xmm2, %xmm1
-; SSE-NEXT:    shufpd {{.*#+}} xmm1 = xmm1[1,0]
+; SSE-NEXT:    movaps %xmm2, %xmm1
+; SSE-NEXT:    movhlps {{.*#+}} xmm1 = xmm1[1,1]
 ; SSE-NEXT:    fldl -{{[0-9]+}}(%rsp)
-; SSE-NEXT:    movapd %xmm2, %xmm0
+; SSE-NEXT:    movaps %xmm2, %xmm0
 ; SSE-NEXT:    retq
 ;
 ; AVX-LABEL: v3f2d_ext_vec:
@@ -43,7 +43,7 @@ define <4 x double> @v4f2d_ext_vec(<4 x float> %v1) nounwind {
 ; SSE-LABEL: v4f2d_ext_vec:
 ; SSE:       # BB#0: # %entry
 ; SSE-NEXT:    cvtps2pd %xmm0, %xmm2
-; SSE-NEXT:    shufpd {{.*#+}} xmm0 = xmm0[1,0]
+; SSE-NEXT:    movhlps {{.*#+}} xmm0 = xmm0[1,1]
 ; SSE-NEXT:    cvtps2pd %xmm0, %xmm1
 ; SSE-NEXT:    movaps %xmm2, %xmm0
 ; SSE-NEXT:    retq
@@ -62,9 +62,9 @@ define <8 x double> @v8f2d_ext_vec(<8 x float> %v1) nounwind {
 ; SSE:       # BB#0: # %entry
 ; SSE-NEXT:    cvtps2pd %xmm0, %xmm5
 ; SSE-NEXT:    cvtps2pd %xmm1, %xmm2
-; SSE-NEXT:    shufpd {{.*#+}} xmm0 = xmm0[1,0]
+; SSE-NEXT:    movhlps {{.*#+}} xmm0 = xmm0[1,1]
 ; SSE-NEXT:    cvtps2pd %xmm0, %xmm4
-; SSE-NEXT:    shufpd {{.*#+}} xmm1 = xmm1[1,0]
+; SSE-NEXT:    movhlps {{.*#+}} xmm1 = xmm1[1,1]
 ; SSE-NEXT:    cvtps2pd %xmm1, %xmm3
 ; SSE-NEXT:    movaps %xmm5, %xmm0
 ; SSE-NEXT:    movaps %xmm4, %xmm1
@@ -85,14 +85,14 @@ entry:
 define void @test_vector_creation() nounwind {
 ; SSE-LABEL: test_vector_creation:
 ; SSE:       # BB#0:
-; SSE-NEXT:    movsd {{.*#+}} xmm0 = mem[0],zero
+; SSE-NEXT:    movq {{.*#+}} xmm0 = mem[0],zero
 ; SSE-NEXT:    pslldq {{.*#+}} xmm0 = zero,zero,zero,zero,zero,zero,zero,zero,xmm0[0,1,2,3,4,5,6,7]
 ; SSE-NEXT:    movdqa %xmm0, (%rax)
 ; SSE-NEXT:    retq
 ;
 ; AVX-LABEL: test_vector_creation:
 ; AVX:       # BB#0:
-; AVX-NEXT:    vmovsd {{.*#+}} xmm0 = mem[0],zero
+; AVX-NEXT:    vmovq {{.*#+}} xmm0 = mem[0],zero
 ; AVX-NEXT:    vpslldq {{.*#+}} xmm0 = zero,zero,zero,zero,zero,zero,zero,zero,xmm0[0,1,2,3,4,5,6,7]
 ; AVX-NEXT:    vinsertf128 $1, %xmm0, %ymm0, %ymm0
 ; AVX-NEXT:    vmovaps %ymm0, (%rax)

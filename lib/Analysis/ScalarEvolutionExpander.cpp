@@ -1182,11 +1182,14 @@ SCEVExpander::getAddRecExprPHILiterally(const SCEVAddRecExpr *Normalized,
   PostIncLoopSet SavedPostIncLoops = PostIncLoops;
   PostIncLoops.clear();
 
-  // Expand code for the start value.
-  Value *StartV =
-      expandCodeFor(Normalized->getStart(), ExpandTy, &L->getHeader()->front());
+  // Expand code for the start value into the loop preheader.
+  assert(L->getLoopPreheader() &&
+         "Can't expand add recurrences without a loop preheader!");
+  Value *StartV = expandCodeFor(Normalized->getStart(), ExpandTy,
+                                L->getLoopPreheader()->getTerminator());
 
-  // StartV must be hoisted into L's preheader to dominate the new phi.
+  // StartV must have been be inserted into L's preheader to dominate the new
+  // phi.
   assert(!isa<Instruction>(StartV) ||
          SE.DT.properlyDominates(cast<Instruction>(StartV)->getParent(),
                                  L->getHeader()));
@@ -1703,9 +1706,28 @@ Value *SCEVExpander::expand(const SCEV *S) {
 
   if (!V)
     V = visit(S);
-  else if (VO.second)
-    V = Builder.CreateSub(V, VO.second);
-
+  else if (VO.second) {
+    if (PointerType *Vty = dyn_cast<PointerType>(V->getType())) {
+      Type *Ety = Vty->getPointerElementType();
+      int64_t Offset = VO.second->getSExtValue();
+      int64_t ESize = SE.getTypeSizeInBits(Ety);
+      if ((Offset * 8) % ESize == 0) {
+        ConstantInt *Idx =
+            ConstantInt::getSigned(VO.second->getType(), -(Offset * 8) / ESize);
+        V = Builder.CreateGEP(Ety, V, Idx, "scevgep");
+      } else {
+        ConstantInt *Idx =
+            ConstantInt::getSigned(VO.second->getType(), -Offset);
+        unsigned AS = Vty->getAddressSpace();
+        V = Builder.CreateBitCast(V, Type::getInt8PtrTy(SE.getContext(), AS));
+        V = Builder.CreateGEP(Type::getInt8Ty(SE.getContext()), V, Idx,
+                              "uglygep");
+        V = Builder.CreateBitCast(V, Vty);
+      }
+    } else {
+      V = Builder.CreateSub(V, VO.second);
+    }
+  }
   // Remember the expanded value for this SCEV at this location.
   //
   // This is independent of PostIncLoops. The mapped value simply materializes
@@ -1942,7 +1964,7 @@ bool SCEVExpander::isHighCostExpansionHelper(
     const SCEV *S, Loop *L, const Instruction *At,
     SmallPtrSetImpl<const SCEV *> &Processed) {
 
-  // If we can find an existing value for this scev avaliable at the point "At"
+  // If we can find an existing value for this scev available at the point "At"
   // then consider the expression cheap.
   if (At && getRelatedExistingExpansion(S, At, L))
     return false;

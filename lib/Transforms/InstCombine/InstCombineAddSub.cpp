@@ -1057,6 +1057,18 @@ Instruction *InstCombiner::visitAdd(BinaryOperator &I) {
       // add(zext(xor i16 X, -32768), -32768) --> sext X
       return CastInst::Create(Instruction::SExt, X, LHS->getType());
     }
+
+    if (Val->isNegative() &&
+        match(LHS, m_ZExt(m_NUWAdd(m_Value(X), m_APInt(C)))) &&
+        Val->sge(-C->sext(Val->getBitWidth()))) {
+      // (add (zext (add nuw X, C)), Val) -> (zext (add nuw X, C+Val))
+      return CastInst::Create(
+          Instruction::ZExt,
+          Builder->CreateNUWAdd(
+              X, Constant::getIntegerValue(X->getType(),
+                                           *C + Val->trunc(C->getBitWidth()))),
+          I.getType());
+    }
   }
 
   // FIXME: Use the match above instead of dyn_cast to allow these transforms
@@ -1226,15 +1238,16 @@ Instruction *InstCombiner::visitAdd(BinaryOperator &I) {
   if (SExtInst *LHSConv = dyn_cast<SExtInst>(LHS)) {
     // (add (sext x), cst) --> (sext (add x, cst'))
     if (ConstantInt *RHSC = dyn_cast<ConstantInt>(RHS)) {
-      Constant *CI =
-        ConstantExpr::getTrunc(RHSC, LHSConv->getOperand(0)->getType());
-      if (LHSConv->hasOneUse() &&
-          ConstantExpr::getSExt(CI, I.getType()) == RHSC &&
-          WillNotOverflowSignedAdd(LHSConv->getOperand(0), CI, I)) {
-        // Insert the new, smaller add.
-        Value *NewAdd = Builder->CreateNSWAdd(LHSConv->getOperand(0),
-                                              CI, "addconv");
-        return new SExtInst(NewAdd, I.getType());
+      if (LHSConv->hasOneUse()) {
+        Constant *CI =
+            ConstantExpr::getTrunc(RHSC, LHSConv->getOperand(0)->getType());
+        if (ConstantExpr::getSExt(CI, I.getType()) == RHSC &&
+            WillNotOverflowSignedAdd(LHSConv->getOperand(0), CI, I)) {
+          // Insert the new, smaller add.
+          Value *NewAdd =
+              Builder->CreateNSWAdd(LHSConv->getOperand(0), CI, "addconv");
+          return new SExtInst(NewAdd, I.getType());
+        }
       }
     }
 
@@ -1252,6 +1265,44 @@ Instruction *InstCombiner::visitAdd(BinaryOperator &I) {
         Value *NewAdd = Builder->CreateNSWAdd(LHSConv->getOperand(0),
                                              RHSConv->getOperand(0), "addconv");
         return new SExtInst(NewAdd, I.getType());
+      }
+    }
+  }
+
+  // Check for (add (zext x), y), see if we can merge this into an
+  // integer add followed by a zext.
+  if (auto *LHSConv = dyn_cast<ZExtInst>(LHS)) {
+    // (add (zext x), cst) --> (zext (add x, cst'))
+    if (ConstantInt *RHSC = dyn_cast<ConstantInt>(RHS)) {
+      if (LHSConv->hasOneUse()) {
+        Constant *CI =
+            ConstantExpr::getTrunc(RHSC, LHSConv->getOperand(0)->getType());
+        if (ConstantExpr::getZExt(CI, I.getType()) == RHSC &&
+            computeOverflowForUnsignedAdd(LHSConv->getOperand(0), CI, &I) ==
+                OverflowResult::NeverOverflows) {
+          // Insert the new, smaller add.
+          Value *NewAdd =
+              Builder->CreateNUWAdd(LHSConv->getOperand(0), CI, "addconv");
+          return new ZExtInst(NewAdd, I.getType());
+        }
+      }
+    }
+
+    // (add (zext x), (zext y)) --> (zext (add int x, y))
+    if (auto *RHSConv = dyn_cast<ZExtInst>(RHS)) {
+      // Only do this if x/y have the same type, if at last one of them has a
+      // single use (so we don't increase the number of zexts), and if the
+      // integer add will not overflow.
+      if (LHSConv->getOperand(0)->getType() ==
+              RHSConv->getOperand(0)->getType() &&
+          (LHSConv->hasOneUse() || RHSConv->hasOneUse()) &&
+          computeOverflowForUnsignedAdd(LHSConv->getOperand(0),
+                                        RHSConv->getOperand(0),
+                                        &I) == OverflowResult::NeverOverflows) {
+        // Insert the new integer add.
+        Value *NewAdd = Builder->CreateNUWAdd(
+            LHSConv->getOperand(0), RHSConv->getOperand(0), "addconv");
+        return new ZExtInst(NewAdd, I.getType());
       }
     }
   }
@@ -1320,15 +1371,9 @@ Instruction *InstCombiner::visitFAdd(BinaryOperator &I) {
           SimplifyFAddInst(LHS, RHS, I.getFastMathFlags(), DL, &TLI, &DT, &AC))
     return replaceInstUsesWith(I, V);
 
-  if (isa<Constant>(RHS)) {
-    if (isa<PHINode>(LHS))
-      if (Instruction *NV = FoldOpIntoPhi(I))
-        return NV;
-
-    if (SelectInst *SI = dyn_cast<SelectInst>(LHS))
-      if (Instruction *NV = FoldOpIntoSelect(I, SI))
-        return NV;
-  }
+  if (isa<Constant>(RHS))
+    if (Instruction *FoldedFAdd = foldOpWithConstantIntoOperand(I))
+      return FoldedFAdd;
 
   // -A + B  -->  B - A
   // -A + -B  -->  -(A + B)
@@ -1554,34 +1599,35 @@ Instruction *InstCombiner::visitSub(BinaryOperator &I) {
         return CastInst::CreateZExtOrBitCast(X, Op1->getType());
   }
 
-  if (ConstantInt *C = dyn_cast<ConstantInt>(Op0)) {
+  const APInt *Op0C;
+  if (match(Op0, m_APInt(Op0C))) {
+    unsigned BitWidth = I.getType()->getScalarSizeInBits();
+
     // -(X >>u 31) -> (X >>s 31)
     // -(X >>s 31) -> (X >>u 31)
-    if (C->isZero()) {
+    if (*Op0C == 0) {
       Value *X;
-      ConstantInt *CI;
-      if (match(Op1, m_LShr(m_Value(X), m_ConstantInt(CI))) &&
-          // Verify we are shifting out everything but the sign bit.
-          CI->getValue() == I.getType()->getPrimitiveSizeInBits() - 1)
-        return BinaryOperator::CreateAShr(X, CI);
-
-      if (match(Op1, m_AShr(m_Value(X), m_ConstantInt(CI))) &&
-          // Verify we are shifting out everything but the sign bit.
-          CI->getValue() == I.getType()->getPrimitiveSizeInBits() - 1)
-        return BinaryOperator::CreateLShr(X, CI);
+      const APInt *ShAmt;
+      if (match(Op1, m_LShr(m_Value(X), m_APInt(ShAmt))) &&
+          *ShAmt == BitWidth - 1) {
+        Value *ShAmtOp = cast<Instruction>(Op1)->getOperand(1);
+        return BinaryOperator::CreateAShr(X, ShAmtOp);
+      }
+      if (match(Op1, m_AShr(m_Value(X), m_APInt(ShAmt))) &&
+          *ShAmt == BitWidth - 1) {
+        Value *ShAmtOp = cast<Instruction>(Op1)->getOperand(1);
+        return BinaryOperator::CreateLShr(X, ShAmtOp);
+      }
     }
 
     // Turn this into a xor if LHS is 2^n-1 and the remaining bits are known
     // zero.
-    APInt IntVal = C->getValue();
-    if ((IntVal + 1).isPowerOf2()) {
-      unsigned BitWidth = I.getType()->getScalarSizeInBits();
+    if ((*Op0C + 1).isPowerOf2()) {
       APInt KnownZero(BitWidth, 0);
       APInt KnownOne(BitWidth, 0);
       computeKnownBits(&I, KnownZero, KnownOne, 0, &I);
-      if ((IntVal | KnownZero).isAllOnesValue()) {
-        return BinaryOperator::CreateXor(Op1, C);
-      }
+      if ((*Op0C | KnownZero).isAllOnesValue())
+        return BinaryOperator::CreateXor(Op1, Op0);
     }
   }
 
@@ -1641,6 +1687,17 @@ Instruction *InstCombiner::visitSub(BinaryOperator &I) {
     if (match(Op1, m_Shl(m_Value(X), m_Value(Y))) && match(Op0, m_Zero()))
       if (Value *XNeg = dyn_castNegVal(X))
         return BinaryOperator::CreateShl(XNeg, Y);
+
+    // Subtracting -1/0 is the same as adding 1/0:
+    // sub [nsw] Op0, sext(bool Y) -> add [nsw] Op0, zext(bool Y)
+    // 'nuw' is dropped in favor of the canonical form.
+    if (match(Op1, m_SExt(m_Value(Y))) &&
+        Y->getType()->getScalarSizeInBits() == 1) {
+      Value *Zext = Builder->CreateZExt(Y, I.getType());
+      BinaryOperator *Add = BinaryOperator::CreateAdd(Op0, Zext);
+      Add->setHasNoSignedWrap(I.hasNoSignedWrap());
+      return Add;
+    }
 
     // X - A*-B -> X + A*B
     // X - -A*B -> X + A*B

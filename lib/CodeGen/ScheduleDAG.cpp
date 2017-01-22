@@ -310,10 +310,20 @@ void SUnit::biasCriticalPath() {
 }
 
 #if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
+void SUnit::print(raw_ostream &OS, const ScheduleDAG *DAG) const {
+  if (this == &DAG->ExitSU)
+    OS << "ExitSU";
+  else if (this == &DAG->EntrySU)
+    OS << "EntrySU";
+  else
+    OS << "SU(" << NodeNum << ")";
+}
+
 /// SUnit - Scheduling unit. It's an wrapper around either a single SDNode or
 /// a group of nodes flagged together.
 void SUnit::dump(const ScheduleDAG *G) const {
-  dbgs() << "SU(" << NodeNum << "): ";
+  print(dbgs(), G);
+  dbgs() << ": ";
   G->dumpNode(this);
 }
 
@@ -337,12 +347,12 @@ void SUnit::dumpAll(const ScheduleDAG *G) const {
          I != E; ++I) {
       dbgs() << "   ";
       switch (I->getKind()) {
-      case SDep::Data:        dbgs() << "val "; break;
-      case SDep::Anti:        dbgs() << "anti"; break;
-      case SDep::Output:      dbgs() << "out "; break;
-      case SDep::Order:       dbgs() << "ch  "; break;
+      case SDep::Data:   dbgs() << "data "; break;
+      case SDep::Anti:   dbgs() << "anti "; break;
+      case SDep::Output: dbgs() << "out  "; break;
+      case SDep::Order:  dbgs() << "ord  "; break;
       }
-      dbgs() << "SU(" << I->getSUnit()->NodeNum << ")";
+      I->getSUnit()->print(dbgs(), G);
       if (I->isArtificial())
         dbgs() << " *";
       dbgs() << ": Latency=" << I->getLatency();
@@ -357,12 +367,12 @@ void SUnit::dumpAll(const ScheduleDAG *G) const {
          I != E; ++I) {
       dbgs() << "   ";
       switch (I->getKind()) {
-      case SDep::Data:        dbgs() << "val "; break;
-      case SDep::Anti:        dbgs() << "anti"; break;
-      case SDep::Output:      dbgs() << "out "; break;
-      case SDep::Order:       dbgs() << "ch  "; break;
+      case SDep::Data:   dbgs() << "data "; break;
+      case SDep::Anti:   dbgs() << "anti "; break;
+      case SDep::Output: dbgs() << "out  "; break;
+      case SDep::Order:  dbgs() << "ord  "; break;
       }
-      dbgs() << "SU(" << I->getSUnit()->NodeNum << ")";
+      I->getSUnit()->print(dbgs(), G);
       if (I->isArtificial())
         dbgs() << " *";
       dbgs() << ": Latency=" << I->getLatency();

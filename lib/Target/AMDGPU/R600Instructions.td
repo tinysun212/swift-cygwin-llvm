@@ -242,20 +242,6 @@ def TEX_SHADOW_ARRAY : PatLeaf<
   }]
 >;
 
-def TEX_MSAA : PatLeaf<
-  (imm),
-  [{uint32_t TType = (uint32_t)N->getZExtValue();
-    return TType == 14;
-  }]
->;
-
-def TEX_ARRAY_MSAA : PatLeaf<
-  (imm),
-  [{uint32_t TType = (uint32_t)N->getZExtValue();
-    return TType == 15;
-  }]
->;
-
 class EG_CF_RAT <bits <8> cfinst, bits <6> ratinst, bits<4> ratid, bits<4> mask,
                  dag outs, dag ins, string asm, list<dag> pattern> :
     InstR600ISA <outs, ins, asm, pattern>,
@@ -450,11 +436,6 @@ def INTERP_LOAD_P0 : R600_1OP <0xE0, "INTERP_LOAD_P0", []>;
 // Export Instructions
 //===----------------------------------------------------------------------===//
 
-def ExportType : SDTypeProfile<0, 7, [SDTCisFP<0>, SDTCisInt<1>]>;
-
-def EXPORT: SDNode<"AMDGPUISD::EXPORT", ExportType,
-  [SDNPHasChain, SDNPSideEffect]>;
-
 class ExportWord0 {
   field bits<32> Word0;
 
@@ -500,7 +481,7 @@ class ExportBufWord1 {
 }
 
 multiclass ExportPattern<Instruction ExportInst, bits<8> cf_inst> {
-  def : Pat<(EXPORT (v4f32 R600_Reg128:$src), (i32 imm:$base), (i32 imm:$type),
+  def : Pat<(R600_EXPORT (v4f32 R600_Reg128:$src), (i32 imm:$base), (i32 imm:$type),
     (i32 imm:$swz_x), (i32 imm:$swz_y), (i32 imm:$swz_z), (i32 imm:$swz_w)),
         (ExportInst R600_Reg128:$src, imm:$type, imm:$base,
         imm:$swz_x, imm:$swz_y, imm:$swz_z, imm:$swz_w, cf_inst, 0)
@@ -1073,18 +1054,27 @@ class LSHL_Common <bits<11> inst> : R600_2OP_Helper <inst, "LSHL", shl>;
 class LSHR_Common <bits<11> inst> : R600_2OP_Helper <inst, "LSHR", srl>;
 class ASHR_Common <bits<11> inst> : R600_2OP_Helper <inst, "ASHR", sra>;
 class MULHI_INT_Common <bits<11> inst> : R600_2OP_Helper <
-  inst, "MULHI_INT", mulhs
-> {
+  inst, "MULHI_INT", mulhs> {
   let Itinerary = TransALU;
 }
+
+class MULHI_INT24_Common <bits<11> inst> : R600_2OP_Helper <
+  inst, "MULHI_INT24", AMDGPUmulhi_i24> {
+  let Itinerary = VecALU;
+}
+
 class MULHI_UINT_Common <bits<11> inst> : R600_2OP_Helper <
-  inst, "MULHI", mulhu
-> {
+  inst, "MULHI", mulhu> {
   let Itinerary = TransALU;
 }
+
+class MULHI_UINT24_Common <bits<11> inst> : R600_2OP_Helper <
+  inst, "MULHI_UINT24", AMDGPUmulhi_u24> {
+  let Itinerary = VecALU;
+}
+
 class MULLO_INT_Common <bits<11> inst> : R600_2OP_Helper <
-  inst, "MULLO_INT", mul
-> {
+  inst, "MULLO_INT", mul> {
   let Itinerary = TransALU;
 }
 class MULLO_UINT_Common <bits<11> inst> : R600_2OP <inst, "MULLO_UINT", []> {
@@ -1277,6 +1267,17 @@ let Predicates = [isR600] in {
 //===----------------------------------------------------------------------===//
 
 defm R600_ : RegisterLoadStore <R600_Reg32, FRAMEri, ADDRIndirect>;
+
+// Hardcode channel to 0
+// NOTE: LSHR is not available here. LSHR is per family instruction
+def : Pat <
+  (i32 (load_private ADDRIndirect:$addr) ),
+  (R600_RegisterLoad FRAMEri:$addr, (i32 0))
+>;
+def : Pat <
+  (store_private i32:$val, ADDRIndirect:$addr),
+  (R600_RegisterStore i32:$val, FRAMEri:$addr, (i32 0))
+>;
 
 
 //===----------------------------------------------------------------------===//

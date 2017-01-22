@@ -7,7 +7,7 @@ LLVM 4.0.0 Release Notes
 
 .. warning::
    These are in-progress notes for the upcoming LLVM 4.0.0 release.  You may
-   prefer the `LLVM 3.8 Release Notes <http://llvm.org/releases/3.8.0/docs
+   prefer the `LLVM 3.9 Release Notes <http://llvm.org/releases/3.9.0/docs
    /ReleaseNotes.html>`_.
 
 
@@ -26,13 +26,14 @@ have questions or comments, the `LLVM Developer's Mailing List
 <http://lists.llvm.org/mailman/listinfo/llvm-dev>`_ is a good place to send
 them.
 
-Note that if you are reading this file from a Subversion checkout or the main
-LLVM web page, this document applies to the *next* release, not the current
-one.  To see the release notes for a specific release, please see the `releases
-page <http://llvm.org/releases/>`_.
-
 Non-comprehensive list of changes in this release
 =================================================
+* The C API functions LLVMAddFunctionAttr, LLVMGetFunctionAttr,
+  LLVMRemoveFunctionAttr, LLVMAddAttribute, LLVMRemoveAttribute,
+  LLVMGetAttribute, LLVMAddInstrAttribute and
+  LLVMRemoveInstrAttribute have been removed.
+
+* The C API enum LLVMAttribute has been deleted.
 
 .. NOTE
    For small 1-3 sentence descriptions, just add an entry at the end of
@@ -40,6 +41,19 @@ Non-comprehensive list of changes in this release
    point (e.g. maybe you would like to give an example of the
    functionality, or simply have a lot to talk about), see the `NOTE` below
    for adding a new subsection.
+
+* The definition and uses of LLVM_ATRIBUTE_UNUSED_RESULT in the LLVM source
+  were replaced with LLVM_NODISCARD, which matches the C++17 [[nodiscard]]
+  semantics rather than gcc's __attribute__((warn_unused_result)).
+
+* Minimum compiler version to build has been raised to GCC 4.8 and VS 2015.
+
+* The Timer related APIs now expect a Name and Description. When upgrading code
+  the previously used names should become descriptions and a short name in the
+  style of a programming language identifier should be added.
+
+* LLVM now handles invariant.group across different basic blocks, which makes
+  it possible to devirtualize virtual calls inside loops.
 
 * ... next change ...
 
@@ -52,6 +66,14 @@ Non-comprehensive list of changes in this release
    -------------------
 
    Makes programs 10x faster by doing Special New Thing.
+
+   Improvements to ThinLTO (-flto=thin)
+   ------------------------------------
+   * Integration with profile data (PGO). When available, profile data 
+     enables more accurate function importing decisions, as well as 
+     cross-module indirect call promotion.
+   * Significant build-time and binary-size improvements when compiling with 
+     debug info (-g).
 
 Changes to the LLVM IR
 ----------------------
@@ -83,10 +105,18 @@ Changes to the AMDGPU Target
 
  During this release ...
 
+Changes to the AVR Target
+-----------------------------
+
+* The entire backend has been merged in-tree with all tests passing. All of
+  the instruction selection code and the machine code backend has landed
+  recently and is fully usable.
+
 Changes to the OCaml bindings
 -----------------------------
 
- During this release ...
+* The attribute API was completely overhauled, following the changes
+  to the C API.
 
 
 External Open Source Projects Using LLVM 4.0.0

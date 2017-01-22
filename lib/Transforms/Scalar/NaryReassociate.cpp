@@ -207,10 +207,10 @@ static bool isPotentiallyNaryReassociable(Instruction *I) {
 bool NaryReassociatePass::doOneIteration(Function &F) {
   bool Changed = false;
   SeenExprs.clear();
-  // Process the basic blocks in pre-order of the dominator tree. This order
-  // ensures that all bases of a candidate are in Candidates when we process it.
-  for (auto Node = GraphTraits<DominatorTree *>::nodes_begin(DT);
-       Node != GraphTraits<DominatorTree *>::nodes_end(DT); ++Node) {
+  // Process the basic blocks in a depth first traversal of the dominator
+  // tree. This order ensures that all bases of a candidate are in Candidates
+  // when we process it.
+  for (const auto Node : depth_first(DT)) {
     BasicBlock *BB = Node->getBlock();
     for (auto I = BB->begin(); I != BB->end(); ++I) {
       if (SE->isSCEVable(I->getType()) && isPotentiallyNaryReassociable(&*I)) {
@@ -281,9 +281,10 @@ Instruction *NaryReassociatePass::tryReassociateGEP(GetElementPtrInst *GEP) {
     return nullptr;
 
   gep_type_iterator GTI = gep_type_begin(*GEP);
-  for (unsigned I = 1, E = GEP->getNumOperands(); I != E; ++I) {
-    if (isa<SequentialType>(*GTI++)) {
-      if (auto *NewGEP = tryReassociateGEPAtIndex(GEP, I - 1, *GTI)) {
+  for (unsigned I = 1, E = GEP->getNumOperands(); I != E; ++I, ++GTI) {
+    if (GTI.isSequential()) {
+      if (auto *NewGEP = tryReassociateGEPAtIndex(GEP, I - 1,
+                                                  GTI.getIndexedType())) {
         return NewGEP;
       }
     }
@@ -354,9 +355,8 @@ NaryReassociatePass::tryReassociateGEPAtIndex(GetElementPtrInst *GEP,
     IndexExprs[I] =
         SE->getZeroExtendExpr(IndexExprs[I], GEP->getOperand(I)->getType());
   }
-  const SCEV *CandidateExpr = SE->getGEPExpr(
-      GEP->getSourceElementType(), SE->getSCEV(GEP->getPointerOperand()),
-      IndexExprs, GEP->isInBounds());
+  const SCEV *CandidateExpr = SE->getGEPExpr(cast<GEPOperator>(GEP),
+                                             IndexExprs);
 
   Value *Candidate = findClosestMatchingDominator(CandidateExpr, GEP);
   if (Candidate == nullptr)

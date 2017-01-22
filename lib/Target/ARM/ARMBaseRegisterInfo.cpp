@@ -49,18 +49,13 @@ ARMBaseRegisterInfo::ARMBaseRegisterInfo()
     : ARMGenRegisterInfo(ARM::LR, 0, 0, ARM::PC), BasePtr(ARM::R6) {}
 
 static unsigned getFramePointerReg(const ARMSubtarget &STI) {
-  if (STI.isTargetMachO())
-    return ARM::R7;
-  else if (STI.isTargetWindows())
-    return ARM::R11;
-  else // ARM EABI
-    return STI.isThumb() ? ARM::R7 : ARM::R11;
+  return STI.useR7AsFramePointer() ? ARM::R7 : ARM::R11;
 }
 
 const MCPhysReg*
 ARMBaseRegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
   const ARMSubtarget &STI = MF->getSubtarget<ARMSubtarget>();
-  bool UseSplitPush = STI.splitFramePushPop();
+  bool UseSplitPush = STI.splitFramePushPop(*MF);
   const MCPhysReg *RegList =
       STI.isTargetDarwin()
           ? CSR_iOS_SaveList
@@ -136,6 +131,15 @@ ARMBaseRegisterInfo::getTLSCallPreservedMask(const MachineFunction &MF) const {
   return CSR_iOS_TLSCall_RegMask;
 }
 
+const uint32_t *
+ARMBaseRegisterInfo::getSjLjDispatchPreservedMask(const MachineFunction &MF) const {
+  const ARMSubtarget &STI = MF.getSubtarget<ARMSubtarget>();
+  if (!STI.useSoftFloat() && STI.hasVFP2() && !STI.isThumb1Only())
+    return CSR_NoRegs_RegMask;
+  else
+    return CSR_FPRegs_RegMask;
+}
+
 
 const uint32_t *
 ARMBaseRegisterInfo::getThisReturnPreservedMask(const MachineFunction &MF,
@@ -163,27 +167,29 @@ getReservedRegs(const MachineFunction &MF) const {
 
   // FIXME: avoid re-calculating this every time.
   BitVector Reserved(getNumRegs());
-  Reserved.set(ARM::SP);
-  Reserved.set(ARM::PC);
-  Reserved.set(ARM::FPSCR);
-  Reserved.set(ARM::APSR_NZCV);
+  markSuperRegs(Reserved, ARM::SP);
+  markSuperRegs(Reserved, ARM::PC);
+  markSuperRegs(Reserved, ARM::FPSCR);
+  markSuperRegs(Reserved, ARM::APSR_NZCV);
   if (TFI->hasFP(MF))
-    Reserved.set(getFramePointerReg(STI));
+    markSuperRegs(Reserved, getFramePointerReg(STI));
   if (hasBasePointer(MF))
-    Reserved.set(BasePtr);
+    markSuperRegs(Reserved, BasePtr);
   // Some targets reserve R9.
   if (STI.isR9Reserved())
-    Reserved.set(ARM::R9);
+    markSuperRegs(Reserved, ARM::R9);
   // Reserve D16-D31 if the subtarget doesn't support them.
   if (!STI.hasVFP3() || STI.hasD16()) {
     static_assert(ARM::D31 == ARM::D16 + 15, "Register list not consecutive!");
-    Reserved.set(ARM::D16, ARM::D31 + 1);
+    for (unsigned R = 0; R < 16; ++R)
+      markSuperRegs(Reserved, ARM::D16 + R);
   }
   const TargetRegisterClass *RC  = &ARM::GPRPairRegClass;
   for(TargetRegisterClass::iterator I = RC->begin(), E = RC->end(); I!=E; ++I)
     for (MCSubRegIterator SI(*I, this); SI.isValid(); ++SI)
-      if (Reserved.test(*SI)) Reserved.set(*I);
+      if (Reserved.test(*SI)) markSuperRegs(Reserved, *I);
 
+  assert(checkAllSuperRegsMarked(Reserved));
   return Reserved;
 }
 

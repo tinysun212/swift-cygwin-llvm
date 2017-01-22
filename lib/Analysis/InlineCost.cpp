@@ -75,15 +75,15 @@ class CallAnalyzer : public InstVisitor<CallAnalyzer, bool> {
   /// Profile summary information.
   ProfileSummaryInfo *PSI;
 
-  // The called function.
+  /// The called function.
   Function &F;
 
-  // The candidate callsite being analyzed. Please do not use this to do
-  // analysis in the caller function; we want the inline cost query to be
-  // easily cacheable. Instead, use the cover function paramHasAttr.
+  /// The candidate callsite being analyzed. Please do not use this to do
+  /// analysis in the caller function; we want the inline cost query to be
+  /// easily cacheable. Instead, use the cover function paramHasAttr.
   CallSite CandidateCS;
 
-  // Tunable parameters that control the analysis.
+  /// Tunable parameters that control the analysis.
   const InlineParams &Params;
 
   int Threshold;
@@ -104,25 +104,25 @@ class CallAnalyzer : public InstVisitor<CallAnalyzer, bool> {
   int FiftyPercentVectorBonus, TenPercentVectorBonus;
   int VectorBonus;
 
-  // While we walk the potentially-inlined instructions, we build up and
-  // maintain a mapping of simplified values specific to this callsite. The
-  // idea is to propagate any special information we have about arguments to
-  // this call through the inlinable section of the function, and account for
-  // likely simplifications post-inlining. The most important aspect we track
-  // is CFG altering simplifications -- when we prove a basic block dead, that
-  // can cause dramatic shifts in the cost of inlining a function.
+  /// While we walk the potentially-inlined instructions, we build up and
+  /// maintain a mapping of simplified values specific to this callsite. The
+  /// idea is to propagate any special information we have about arguments to
+  /// this call through the inlinable section of the function, and account for
+  /// likely simplifications post-inlining. The most important aspect we track
+  /// is CFG altering simplifications -- when we prove a basic block dead, that
+  /// can cause dramatic shifts in the cost of inlining a function.
   DenseMap<Value *, Constant *> SimplifiedValues;
 
-  // Keep track of the values which map back (through function arguments) to
-  // allocas on the caller stack which could be simplified through SROA.
+  /// Keep track of the values which map back (through function arguments) to
+  /// allocas on the caller stack which could be simplified through SROA.
   DenseMap<Value *, Value *> SROAArgValues;
 
-  // The mapping of caller Alloca values to their accumulated cost savings. If
-  // we have to disable SROA for one of the allocas, this tells us how much
-  // cost must be added.
+  /// The mapping of caller Alloca values to their accumulated cost savings. If
+  /// we have to disable SROA for one of the allocas, this tells us how much
+  /// cost must be added.
   DenseMap<Value *, int> SROAArgCosts;
 
-  // Keep track of values which map to a pointer base and constant offset.
+  /// Keep track of values which map to a pointer base and constant offset.
   DenseMap<Value *, std::pair<Value *, APInt>> ConstantOffsetPtrs;
 
   // Custom simplification helper routines.
@@ -318,7 +318,7 @@ bool CallAnalyzer::accumulateGEPOffset(GEPOperator &GEP, APInt &Offset) {
       continue;
 
     // Handle a struct index, which adds its field offset to the pointer.
-    if (StructType *STy = dyn_cast<StructType>(*GTI)) {
+    if (StructType *STy = GTI.getStructTypeOrNull()) {
       unsigned ElementIdx = OpC->getZExtValue();
       const StructLayout *SL = DL.getStructLayout(STy);
       Offset += APInt(IntPtrWidth, SL->getElementOffset(ElementIdx));
@@ -636,29 +636,26 @@ void CallAnalyzer::updateThreshold(CallSite CS, Function &Callee) {
   else if (Caller->optForSize())
     Threshold = MinIfValid(Threshold, Params.OptSizeThreshold);
 
-  bool HotCallsite = false;
-  uint64_t TotalWeight;
-  if (CS.getInstruction()->extractProfTotalWeight(TotalWeight) &&
-      PSI->isHotCount(TotalWeight)) {
-    HotCallsite = true;
+  // Adjust the threshold based on inlinehint attribute and profile based
+  // hotness information if the caller does not have MinSize attribute.
+  if (!Caller->optForMinSize()) {
+    if (Callee.hasFnAttribute(Attribute::InlineHint))
+      Threshold = MaxIfValid(Threshold, Params.HintThreshold);
+    if (PSI) {
+      uint64_t TotalWeight;
+      if (CS.getInstruction()->extractProfTotalWeight(TotalWeight) &&
+          PSI->isHotCount(TotalWeight)) {
+        Threshold = MaxIfValid(Threshold, Params.HotCallSiteThreshold);
+      } else if (PSI->isFunctionEntryHot(&Callee)) {
+        // If callsite hotness can not be determined, we may still know
+        // that the callee is hot and treat it as a weaker hint for threshold
+        // increase.
+        Threshold = MaxIfValid(Threshold, Params.HintThreshold);
+      } else if (PSI->isFunctionEntryCold(&Callee)) {
+        Threshold = MinIfValid(Threshold, Params.ColdThreshold);
+      }
+    }
   }
-
-  // Listen to the inlinehint attribute or profile based hotness information
-  // when it would increase the threshold and the caller does not need to
-  // minimize its size.
-  bool InlineHint = Callee.hasFnAttribute(Attribute::InlineHint) ||
-                    PSI->isHotFunction(&Callee);
-  if (InlineHint && !Caller->optForMinSize())
-    Threshold = MaxIfValid(Threshold, Params.HintThreshold);
-
-  if (HotCallsite && !Caller->optForMinSize())
-    Threshold = MaxIfValid(Threshold, Params.HotCallSiteThreshold);
-
-  bool ColdCallee = PSI->isColdFunction(&Callee);
-  // For cold callees, use the ColdThreshold knob if it is available and reduces
-  // the threshold.
-  if (ColdCallee)
-    Threshold = MinIfValid(Threshold, Params.ColdThreshold);
 
   // Finally, take the target-specific inlining threshold multiplier into
   // account.
@@ -962,7 +959,7 @@ bool CallAnalyzer::visitCallSite(CallSite CS) {
   // out. Pretend to inline the function, with a custom threshold.
   auto IndirectCallParams = Params;
   IndirectCallParams.DefaultThreshold = InlineConstants::IndirectCallThreshold;
-  CallAnalyzer CA(TTI, GetAssumptionCache, PSI, *F, CS, Params);
+  CallAnalyzer CA(TTI, GetAssumptionCache, PSI, *F, CS, IndirectCallParams);
   if (CA.analyzeCall(CS)) {
     // We were able to inline the indirect call! Subtract the cost from the
     // threshold to get the bonus we want to apply, but don't go below zero.
@@ -1255,7 +1252,9 @@ bool CallAnalyzer::analyzeCall(CallSite CS) {
       Cost -= InlineConstants::InstrCost;
     }
   }
-
+  // The call instruction also disappears after inlining.
+  Cost -= InlineConstants::InstrCost + InlineConstants::CallPenalty;
+  
   // If there is only one call of the function, and it has internal linkage,
   // the cost of inlining it drops dramatically.
   bool OnlyOneCallAndLocalLinkage =
@@ -1484,7 +1483,7 @@ InlineCost llvm::getInlineCost(
 
   // Don't inline functions which can be interposed at link-time.  Don't inline
   // functions marked noinline or call sites marked noinline.
-  // Note: inlining non-exact non-interposable fucntions is fine, since we know
+  // Note: inlining non-exact non-interposable functions is fine, since we know
   // we have *a* correct implementation of the source level function.
   if (Callee->isInterposable() || Callee->hasFnAttribute(Attribute::NoInline) ||
       CS.isNoInline())

@@ -270,6 +270,14 @@ unsigned MipsELFObjectWriter::getRelocType(MCContext &Ctx,
   case Mips::fixup_Mips_64:
   case FK_Data_8:
     return ELF::R_MIPS_64;
+  case FK_DTPRel_4:
+    return ELF::R_MIPS_TLS_DTPREL32;
+  case FK_DTPRel_8:
+    return ELF::R_MIPS_TLS_DTPREL64;
+  case FK_TPRel_4:
+    return ELF::R_MIPS_TLS_TPREL32;
+  case FK_TPRel_8:
+    return ELF::R_MIPS_TLS_TPREL64;
   case FK_GPRel_4:
     if (isN64()) {
       unsigned Type = (unsigned)ELF::R_MIPS_NONE;
@@ -411,6 +419,13 @@ unsigned MipsELFObjectWriter::getRelocType(MCContext &Ctx,
 /// always match using the expressions from the source.
 void MipsELFObjectWriter::sortRelocs(const MCAssembler &Asm,
                                      std::vector<ELFRelocationEntry> &Relocs) {
+
+  // We do not need to sort the relocation table for RELA relocations which
+  // N32/N64 uses as the relocation addend contains the value we require,
+  // rather than it being split across a pair of relocations.
+  if (hasRelocationAddend())
+    return;
+
   if (Relocs.size() < 2)
     return;
 
@@ -531,7 +546,7 @@ bool MipsELFObjectWriter::needsRelocateWithSymbol(const MCSymbol &Sym,
   case ELF::R_MIPS_GPREL32:
     if (cast<MCSymbolELF>(Sym).getOther() & ELF::STO_MIPS_MICROMIPS)
       return true;
-    // fallthrough
+    LLVM_FALLTHROUGH;
   case ELF::R_MIPS_26:
   case ELF::R_MIPS_64:
   case ELF::R_MIPS_GPREL16:

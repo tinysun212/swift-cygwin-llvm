@@ -25,15 +25,19 @@ class AMDGPUSubtarget;
 class MachineRegisterInfo;
 
 class AMDGPUTargetLowering : public TargetLowering {
+private:
+  /// \returns AMDGPUISD::FFBH_U32 node if the incoming \p Op may have been
+  /// legalized from a smaller type VT. Need to match pre-legalized type because
+  /// the generic legalization inserts the add/sub between the select and
+  /// compare.
+  SDValue getFFBH_U32(SelectionDAG &DAG, SDValue Op, const SDLoc &DL) const;
+
 protected:
   const AMDGPUSubtarget *Subtarget;
 
   SDValue LowerEXTRACT_SUBVECTOR(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerCONCAT_VECTORS(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerINTRINSIC_WO_CHAIN(SDValue Op, SelectionDAG &DAG) const;
-  /// \brief Lower vector stores by merging the vector elements into an integer
-  /// of the same bitwidth.
-  SDValue MergeVectorStore(const SDValue &Op, SelectionDAG &DAG) const;
   /// \brief Split a vector store into multiple scalar stores.
   /// \returns The resulting chain.
 
@@ -56,6 +60,7 @@ protected:
   SDValue LowerSINT_TO_FP(SDValue Op, SelectionDAG &DAG) const;
 
   SDValue LowerFP64_TO_INT(SDValue Op, SelectionDAG &DAG, bool Signed) const;
+  SDValue LowerFP_TO_FP16(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerFP_TO_UINT(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerFP_TO_SINT(SDValue Op, SelectionDAG &DAG) const;
 
@@ -65,14 +70,21 @@ protected:
   bool shouldCombineMemoryType(EVT VT) const;
   SDValue performLoadCombine(SDNode *N, DAGCombinerInfo &DCI) const;
   SDValue performStoreCombine(SDNode *N, DAGCombinerInfo &DCI) const;
-  SDValue performAndCombine(SDNode *N, DAGCombinerInfo &DCI) const;
+
+  SDValue splitBinaryBitConstantOpImpl(DAGCombinerInfo &DCI, const SDLoc &SL,
+                                       unsigned Opc, SDValue LHS,
+                                       uint32_t ValLo, uint32_t ValHi) const;
   SDValue performShlCombine(SDNode *N, DAGCombinerInfo &DCI) const;
   SDValue performSraCombine(SDNode *N, DAGCombinerInfo &DCI) const;
   SDValue performSrlCombine(SDNode *N, DAGCombinerInfo &DCI) const;
   SDValue performMulCombine(SDNode *N, DAGCombinerInfo &DCI) const;
+  SDValue performMulhsCombine(SDNode *N, DAGCombinerInfo &DCI) const;
+  SDValue performMulhuCombine(SDNode *N, DAGCombinerInfo &DCI) const;
+  SDValue performMulLoHi24Combine(SDNode *N, DAGCombinerInfo &DCI) const;
   SDValue performCtlzCombine(const SDLoc &SL, SDValue Cond, SDValue LHS,
                              SDValue RHS, DAGCombinerInfo &DCI) const;
   SDValue performSelectCombine(SDNode *N, DAGCombinerInfo &DCI) const;
+  SDValue performFNegCombine(SDNode *N, DAGCombinerInfo &DCI) const;
 
   static EVT getEquivalentMemType(LLVMContext &Context, EVT VT);
 
@@ -97,16 +109,8 @@ protected:
   SDValue LowerDIVREM24(SDValue Op, SelectionDAG &DAG, bool sign) const;
   void LowerUDIVREM64(SDValue Op, SelectionDAG &DAG,
                                     SmallVectorImpl<SDValue> &Results) const;
-  /// The SelectionDAGBuilder will automatically promote function arguments
-  /// with illegal types.  However, this does not work for the AMDGPU targets
-  /// since the function arguments are stored in memory as these illegal types.
-  /// In order to handle this properly we need to get the origianl types sizes
-  /// from the LLVM IR Function and fixup the ISD:InputArg values before
-  /// passing them to AnalyzeFormalArguments()
-  void getOriginalFunctionArgs(SelectionDAG &DAG,
-                               const Function *F,
-                               const SmallVectorImpl<ISD::InputArg> &Ins,
-                               SmallVectorImpl<ISD::InputArg> &OrigIns) const;
+  void analyzeFormalArgumentsCompute(CCState &State,
+                              const SmallVectorImpl<ISD::InputArg> &Ins) const;
   void AnalyzeFormalArguments(CCState &State,
                               const SmallVectorImpl<ISD::InputArg> &Ins) const;
   void AnalyzeReturn(CCState &State,
@@ -169,13 +173,11 @@ public:
   bool isFsqrtCheap(SDValue Operand, SelectionDAG &DAG) const override {
     return true;
   }
-  SDValue getRsqrtEstimate(SDValue Operand,
-                           DAGCombinerInfo &DCI,
-                           unsigned &RefinementSteps,
-                           bool &UseOneConstNR) const override;
-  SDValue getRecipEstimate(SDValue Operand,
-                           DAGCombinerInfo &DCI,
-                           unsigned &RefinementSteps) const override;
+  SDValue getSqrtEstimate(SDValue Operand, SelectionDAG &DAG, int Enabled,
+                           int &RefinementSteps, bool &UseOneConstNR,
+                           bool Reciprocal) const override;
+  SDValue getRecipEstimate(SDValue Operand, SelectionDAG &DAG, int Enabled,
+                           int &RefinementSteps) const override;
 
   virtual SDNode *PostISelFolding(MachineSDNode *N,
                                   SelectionDAG &DAG) const = 0;
@@ -226,9 +228,13 @@ enum NodeType : unsigned {
   DWORDADDR,
   FRACT,
   CLAMP,
-  // This is SETCC with the full mask result which is used for a compare with a 
+  // This is SETCC with the full mask result which is used for a compare with a
   // result bit per item in the wavefront.
-  SETCC,    
+  SETCC,
+  SETREG,
+  // FP ops with input and output chain.
+  FMA_W_CHAIN,
+  FMUL_W_CHAIN,
 
   // SIN_HW, COS_HW - f32 for SI, 1 ULP max error, valid from -100 pi to 100 pi.
   // Denormals handled on some parts.
@@ -272,10 +278,16 @@ enum NodeType : unsigned {
   FFBH_I32,
   MUL_U24,
   MUL_I24,
+  MULHI_U24,
+  MULHI_I24,
   MAD_U24,
   MAD_I24,
+  MUL_LOHI_I24,
+  MUL_LOHI_U24,
   TEXTURE_FETCH,
-  EXPORT,
+  EXPORT, // exp on SI+
+  EXPORT_DONE, // exp on SI+ with done bit set
+  R600_EXPORT,
   CONST_ADDRESS,
   REGISTER_LOAD,
   REGISTER_STORE,
@@ -302,6 +314,7 @@ enum NodeType : unsigned {
   /// Pointer to the start of the shader's constant data.
   CONST_DATA_PTR,
   SENDMSG,
+  SENDMSGHALT,
   INTERP_MOV,
   INTERP_P1,
   INTERP_P2,
@@ -314,6 +327,8 @@ enum NodeType : unsigned {
   ATOMIC_CMP_SWAP,
   ATOMIC_INC,
   ATOMIC_DEC,
+  BUFFER_LOAD,
+  BUFFER_LOAD_FORMAT,
   LAST_AMDGPU_ISD_NUMBER
 };
 

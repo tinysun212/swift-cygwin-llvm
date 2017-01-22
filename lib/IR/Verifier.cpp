@@ -117,7 +117,7 @@ using namespace llvm;
 
 static cl::opt<bool> VerifyDebugInfo("verify-debug-info", cl::init(true));
 
-namespace {
+namespace llvm {
 
 struct VerifierSupport {
   raw_ostream *OS;
@@ -137,10 +137,6 @@ struct VerifierSupport {
       : OS(OS), M(M), MST(&M), DL(M.getDataLayout()), Context(M.getContext()) {}
 
 private:
-  template <class NodeTy> void Write(const ilist_iterator<NodeTy> &I) {
-    Write(&*I);
-  }
-
   void Write(const Module *M) {
     *OS << "; ModuleID = '" << M->getModuleIdentifier() << "'\n";
   }
@@ -190,6 +186,14 @@ private:
       return;
     *OS << *C;
   }
+
+  void Write(const APInt *AI) {
+    if (!AI)
+      return;
+    *OS << *AI << '\n';
+  }
+
+  void Write(const unsigned i) { *OS << i << '\n'; }
 
   template <typename T> void Write(ArrayRef<T> Vs) {
     for (const T &V : Vs)
@@ -244,6 +248,10 @@ public:
   }
 };
 
+} // namespace llvm
+
+namespace {
+
 class Verifier : public InstVisitor<Verifier>, VerifierSupport {
   friend class InstVisitor<Verifier>;
 
@@ -289,13 +297,15 @@ class Verifier : public InstVisitor<Verifier>, VerifierSupport {
   // constant expressions, we can arrive at a particular user many times.
   SmallPtrSet<const Value *, 32> GlobalValueVisited;
 
+  TBAAVerifier TBAAVerifyHelper;
+
   void checkAtomicMemAccessSize(Type *Ty, const Instruction *I);
 
 public:
   explicit Verifier(raw_ostream *OS, bool ShouldTreatBrokenDebugInfoAsError,
                     const Module &M)
       : VerifierSupport(OS, M), LandingPadResultTy(nullptr),
-        SawFrameEscape(false) {
+        SawFrameEscape(false), TBAAVerifyHelper(this) {
     TreatBrokenDebugInfoAsError = ShouldTreatBrokenDebugInfoAsError;
   }
 
@@ -393,8 +403,8 @@ private:
                        SmallVectorImpl<const MDNode *> &Requirements);
   void visitFunction(const Function &F);
   void visitBasicBlock(BasicBlock &BB);
-  void visitRangeMetadata(Instruction& I, MDNode* Range, Type* Ty);
-  void visitDereferenceableMetadata(Instruction& I, MDNode* MD);
+  void visitRangeMetadata(Instruction &I, MDNode *Range, Type *Ty);
+  void visitDereferenceableMetadata(Instruction &I, MDNode *MD);
 
   template <class Ty> bool isValidMetadataArray(const MDTuple &N);
 #define HANDLE_SPECIALIZED_MDNODE_LEAF(CLASS) void visit##CLASS(const CLASS &N);
@@ -486,7 +496,7 @@ private:
   void verifyFrameRecoverIndices();
   void verifySiblingFuncletUnwinds();
 
-  void verifyBitPieceExpression(const DbgInfoIntrinsic &I);
+  void verifyFragmentExpression(const DbgInfoIntrinsic &I);
 
   /// Module-level debug info verification...
   void verifyCompileUnits();
@@ -570,7 +580,6 @@ void Verifier::visitGlobalVariable(const GlobalVariable &GV) {
            "Global variable initializer type does not match global "
            "variable type!",
            &GV);
-
     // If the global has common linkage, it must have a zero initializer and
     // cannot be constant.
     if (GV.hasCommonLinkage()) {
@@ -635,6 +644,16 @@ void Verifier::visitGlobalVariable(const GlobalVariable &GV) {
              (GV.isDeclaration() && GV.hasExternalLinkage()) ||
              GV.hasAvailableExternallyLinkage(),
          "Global is marked as dllimport, but not external", &GV);
+
+  // Visit any debug info attachments.
+  SmallVector<MDNode *, 1> MDs;
+  GV.getMetadata(LLVMContext::MD_dbg, MDs);
+  for (auto *MD : MDs) {
+    if (auto *GVE = dyn_cast<DIGlobalVariableExpression>(MD))
+      visitDIGlobalVariableExpression(*GVE);
+    else
+      AssertDI(false, "!dbg attachment of global variable must be a DIGlobalVariableExpression");
+  }
 
   if (!GV.hasInitializer()) {
     visitGlobalValue(GV);
@@ -702,10 +721,15 @@ void Verifier::visitGlobalAlias(const GlobalAlias &GA) {
 }
 
 void Verifier::visitNamedMDNode(const NamedMDNode &NMD) {
+  // There used to be various other llvm.dbg.* nodes, but we don't support
+  // upgrading them and we want to reserve the namespace for future uses.
+  if (NMD.getName().startswith("llvm.dbg."))
+    AssertDI(NMD.getName() == "llvm.dbg.cu",
+             "unrecognized named metadata node in the llvm.dbg namespace",
+             &NMD);
   for (const MDNode *MD : NMD.operands()) {
-    if (NMD.getName() == "llvm.dbg.cu") {
+    if (NMD.getName() == "llvm.dbg.cu")
       AssertDI(MD && isa<DICompileUnit>(MD), "invalid compile unit", &NMD, MD);
-    }
 
     if (!MD)
       continue;
@@ -863,6 +887,7 @@ void Verifier::visitDIDerivedType(const DIDerivedType &N) {
                N.getTag() == dwarf::DW_TAG_const_type ||
                N.getTag() == dwarf::DW_TAG_volatile_type ||
                N.getTag() == dwarf::DW_TAG_restrict_type ||
+               N.getTag() == dwarf::DW_TAG_atomic_type ||
                N.getTag() == dwarf::DW_TAG_member ||
                N.getTag() == dwarf::DW_TAG_inheritance ||
                N.getTag() == dwarf::DW_TAG_friend,
@@ -936,6 +961,8 @@ void Verifier::visitDISubroutineType(const DISubroutineType &N) {
 
 void Verifier::visitDIFile(const DIFile &N) {
   AssertDI(N.getTag() == dwarf::DW_TAG_file_type, "invalid tag", &N);
+  AssertDI((N.getChecksumKind() != DIFile::CSK_None ||
+            N.getChecksum().empty()), "invalid checksum kind", &N);
 }
 
 void Verifier::visitDICompileUnit(const DICompileUnit &N) {
@@ -972,8 +999,8 @@ void Verifier::visitDICompileUnit(const DICompileUnit &N) {
   if (auto *Array = N.getRawGlobalVariables()) {
     AssertDI(isa<MDTuple>(Array), "invalid global variable list", &N, Array);
     for (Metadata *Op : N.getGlobalVariables()->operands()) {
-      AssertDI(Op && isa<DIGlobalVariable>(Op), "invalid global variable ref",
-               &N, Op);
+      AssertDI(Op && (isa<DIGlobalVariableExpression>(Op)),
+               "invalid global variable ref", &N, Op);
     }
   }
   if (auto *Array = N.getRawImportedEntities()) {
@@ -1116,12 +1143,6 @@ void Verifier::visitDIGlobalVariable(const DIGlobalVariable &N) {
 
   AssertDI(N.getTag() == dwarf::DW_TAG_variable, "invalid tag", &N);
   AssertDI(!N.getName().empty(), "missing global variable name", &N);
-  if (auto *V = N.getRawVariable()) {
-    AssertDI(isa<ConstantAsMetadata>(V) &&
-                 !isa<Function>(cast<ConstantAsMetadata>(V)->getValue()),
-             "invalid global varaible ref", &N, V);
-    visitConstantExprsRecursively(cast<ConstantAsMetadata>(V)->getValue());
-  }
   if (auto *Member = N.getRawStaticDataMemberDeclaration()) {
     AssertDI(isa<DIDerivedType>(Member),
              "invalid static data member declaration", &N, Member);
@@ -1139,6 +1160,15 @@ void Verifier::visitDILocalVariable(const DILocalVariable &N) {
 
 void Verifier::visitDIExpression(const DIExpression &N) {
   AssertDI(N.isValid(), "invalid expression", &N);
+}
+
+void Verifier::visitDIGlobalVariableExpression(
+    const DIGlobalVariableExpression &GVE) {
+  AssertDI(GVE.getVariable(), "missing variable");
+  if (auto *Var = GVE.getVariable())
+    visitDIGlobalVariable(*Var);
+  if (auto *Expr = GVE.getExpression())
+    visitDIExpression(*Expr);
 }
 
 void Verifier::visitDIObjCProperty(const DIObjCProperty &N) {
@@ -2117,9 +2147,9 @@ void Verifier::visitFunction(const Function &F) {
         continue;
 
       // FIXME: Once N is canonical, check "SP == &N".
-      Assert(SP->describes(&F),
-             "!dbg attachment points at wrong subprogram for function", N, &F,
-             &I, DL, Scope, SP);
+      AssertDI(SP->describes(&F),
+               "!dbg attachment points at wrong subprogram for function", N, &F,
+               &I, DL, Scope, SP);
     }
 }
 
@@ -2590,15 +2620,20 @@ void Verifier::verifyCallSite(CallSite CS) {
   }
 
   // For each argument of the callsite, if it has the swifterror argument,
-  // make sure the underlying alloca has swifterror as well.
+  // make sure the underlying alloca/parameter it comes from has a swifterror as
+  // well.
   for (unsigned i = 0, e = FTy->getNumParams(); i != e; ++i)
     if (CS.paramHasAttr(i+1, Attribute::SwiftError)) {
       Value *SwiftErrorArg = CS.getArgument(i);
-      auto AI = dyn_cast<AllocaInst>(SwiftErrorArg->stripInBoundsOffsets());
-      Assert(AI, "swifterror argument should come from alloca", AI, I);
-      if (AI)
+      if (auto AI = dyn_cast<AllocaInst>(SwiftErrorArg->stripInBoundsOffsets())) {
         Assert(AI->isSwiftError(),
                "swifterror argument for call has mismatched alloca", AI, I);
+        continue;
+      }
+      auto ArgI = dyn_cast<Argument>(SwiftErrorArg);
+      Assert(ArgI, "swifterror argument should come from an alloca or parameter", SwiftErrorArg, I);
+      Assert(ArgI->hasSwiftErrorAttr(),
+             "swifterror argument for call has mismatched parameter", ArgI, I);
     }
 
   if (FTy->isVarArg()) {
@@ -2964,10 +2999,8 @@ static bool isContiguous(const ConstantRange &A, const ConstantRange &B) {
   return A.getUpper() == B.getLower() || A.getLower() == B.getUpper();
 }
 
-void Verifier::visitRangeMetadata(Instruction& I,
-                                  MDNode* Range, Type* Ty) {
-  assert(Range &&
-         Range == I.getMetadata(LLVMContext::MD_range) &&
+void Verifier::visitRangeMetadata(Instruction &I, MDNode *Range, Type *Ty) {
+  assert(Range && Range == I.getMetadata(LLVMContext::MD_range) &&
          "precondition violation");
 
   unsigned NumOperands = Range->getNumOperands();
@@ -3760,7 +3793,7 @@ void Verifier::visitInstruction(Instruction &I) {
     if (ConstantFP *CFP0 =
             mdconst::dyn_extract_or_null<ConstantFP>(MD->getOperand(0))) {
       const APFloat &Accuracy = CFP0->getValueAPF();
-      Assert(&Accuracy.getSemantics() == &APFloat::IEEEsingle,
+      Assert(&Accuracy.getSemantics() == &APFloat::IEEEsingle(),
              "fpmath accuracy must have float type", &I);
       Assert(Accuracy.isFiniteNonZero() && !Accuracy.isNegative(),
              "fpmath accuracy not a positive number!", &I);
@@ -3790,6 +3823,9 @@ void Verifier::visitInstruction(Instruction &I) {
   if (MDNode *MD = I.getMetadata(LLVMContext::MD_dereferenceable_or_null))
     visitDereferenceableMetadata(I, MD);
 
+  if (MDNode *TBAA = I.getMetadata(LLVMContext::MD_tbaa))
+    TBAAVerifyHelper.visitTBAAMetadata(I, TBAA);
+
   if (MDNode *AlignMD = I.getMetadata(LLVMContext::MD_align)) {
     Assert(I.getType()->isPointerTy(), "align applies only to pointer types",
            &I);
@@ -3812,7 +3848,7 @@ void Verifier::visitInstruction(Instruction &I) {
   }
 
   if (auto *DII = dyn_cast<DbgInfoIntrinsic>(&I))
-    verifyBitPieceExpression(*DII);
+    verifyFragmentExpression(*DII);
 
   InstsInThisBlock.insert(&I);
 }
@@ -3873,7 +3909,7 @@ void Verifier::visitIntrinsicCallSite(Intrinsic::ID ID, CallSite CS) {
   default:
     break;
   case Intrinsic::coro_id: {
-    auto *InfoArg = CS.getArgOperand(2)->stripPointerCasts();
+    auto *InfoArg = CS.getArgOperand(3)->stripPointerCasts();
     if (isa<ConstantPointerNull>(InfoArg))
       break;
     auto *GV = dyn_cast<GlobalVariable>(InfoArg);
@@ -3913,6 +3949,32 @@ void Verifier::visitIntrinsicCallSite(Intrinsic::ID ID, CallSite CS) {
            "alignment argument of memory intrinsics must be a power of 2", CS);
     Assert(isa<ConstantInt>(CS.getArgOperand(4)),
            "isvolatile argument of memory intrinsics must be a constant int",
+           CS);
+    break;
+  }
+  case Intrinsic::memcpy_element_atomic: {
+    ConstantInt *ElementSizeCI = dyn_cast<ConstantInt>(CS.getArgOperand(3));
+    Assert(ElementSizeCI, "element size of the element-wise atomic memory "
+                          "intrinsic must be a constant int",
+           CS);
+    const APInt &ElementSizeVal = ElementSizeCI->getValue();
+    Assert(ElementSizeVal.isPowerOf2(),
+           "element size of the element-wise atomic memory intrinsic "
+           "must be a power of 2",
+           CS);
+
+    auto IsValidAlignment = [&](uint64_t Alignment) {
+      return isPowerOf2_64(Alignment) && ElementSizeVal.ule(Alignment);
+    };
+    
+    uint64_t DstAlignment = CS.getParamAlignment(1),
+             SrcAlignment = CS.getParamAlignment(2);
+
+    Assert(IsValidAlignment(DstAlignment),
+           "incorrect alignment of the destination argument",
+           CS);
+    Assert(IsValidAlignment(SrcAlignment),
+           "incorrect alignment of the source argument",
            CS);
     break;
   }
@@ -4264,10 +4326,10 @@ void Verifier::visitDbgIntrinsic(StringRef Kind, DbgIntrinsicTy &DII) {
   if (!VarSP || !LocSP)
     return; // Broken scope chains are checked elsewhere.
 
-  Assert(VarSP == LocSP, "mismatched subprogram between llvm.dbg." + Kind +
-                             " variable and !dbg attachment",
-         &DII, BB, F, Var, Var->getScope()->getSubprogram(), Loc,
-         Loc->getScope()->getSubprogram());
+  AssertDI(VarSP == LocSP, "mismatched subprogram between llvm.dbg." + Kind +
+                               " variable and !dbg attachment",
+           &DII, BB, F, Var, Var->getScope()->getSubprogram(), Loc,
+           Loc->getScope()->getSubprogram());
 }
 
 static uint64_t getVariableSize(const DILocalVariable &V) {
@@ -4293,7 +4355,7 @@ static uint64_t getVariableSize(const DILocalVariable &V) {
   return 0;
 }
 
-void Verifier::verifyBitPieceExpression(const DbgInfoIntrinsic &I) {
+void Verifier::verifyFragmentExpression(const DbgInfoIntrinsic &I) {
   DILocalVariable *V;
   DIExpression *E;
   if (auto *DVI = dyn_cast<DbgValueInst>(&I)) {
@@ -4310,7 +4372,8 @@ void Verifier::verifyBitPieceExpression(const DbgInfoIntrinsic &I) {
     return;
 
   // Nothing to do if this isn't a bit piece expression.
-  if (!E->isBitPiece())
+  auto Fragment = E->getFragmentInfo();
+  if (!Fragment)
     return;
 
   // The frontend helps out GDB by emitting the members of local anonymous
@@ -4328,11 +4391,11 @@ void Verifier::verifyBitPieceExpression(const DbgInfoIntrinsic &I) {
   if (!VarSize)
     return;
 
-  unsigned PieceSize = E->getBitPieceSize();
-  unsigned PieceOffset = E->getBitPieceOffset();
-  Assert(PieceSize + PieceOffset <= VarSize,
-         "piece is larger than or outside of variable", &I, V, E);
-  Assert(PieceSize != VarSize, "piece covers entire variable", &I, V, E);
+  unsigned FragSize = Fragment->SizeInBits;
+  unsigned FragOffset = Fragment->OffsetInBits;
+  AssertDI(FragSize + FragOffset <= VarSize,
+         "fragment is larger than or outside of variable", &I, V, E);
+  AssertDI(FragSize != VarSize, "fragment covers entire variable", &I, V, E);
 }
 
 void Verifier::verifyCompileUnits() {
@@ -4340,7 +4403,7 @@ void Verifier::verifyCompileUnits() {
   SmallPtrSet<const Metadata *, 2> Listed;
   if (CUs)
     Listed.insert(CUs->op_begin(), CUs->op_end());
-  Assert(
+  AssertDI(
       all_of(CUVisited,
              [&Listed](const Metadata *CU) { return Listed.count(CU); }),
       "All DICompileUnits must be listed in llvm.dbg.cu");
@@ -4452,6 +4515,276 @@ struct VerifierLegacyPass : public FunctionPass {
 
 } // end anonymous namespace
 
+/// Helper to issue failure from the TBAA verification
+template <typename... Tys> void TBAAVerifier::CheckFailed(Tys &&... Args) {
+  if (Diagnostic)
+    return Diagnostic->CheckFailed(Args...);
+}
+
+#define AssertTBAA(C, ...)                                                     \
+  do {                                                                         \
+    if (!(C)) {                                                                \
+      CheckFailed(__VA_ARGS__);                                                \
+      return false;                                                            \
+    }                                                                          \
+  } while (false)
+
+/// Verify that \p BaseNode can be used as the "base type" in the struct-path
+/// TBAA scheme.  This means \p BaseNode is either a scalar node, or a
+/// struct-type node describing an aggregate data structure (like a struct).
+TBAAVerifier::TBAABaseNodeSummary
+TBAAVerifier::verifyTBAABaseNode(Instruction &I, const MDNode *BaseNode) {
+  if (BaseNode->getNumOperands() < 2) {
+    CheckFailed("Base nodes must have at least two operands", &I, BaseNode);
+    return {true, ~0u};
+  }
+
+  auto Itr = TBAABaseNodes.find(BaseNode);
+  if (Itr != TBAABaseNodes.end())
+    return Itr->second;
+
+  auto Result = verifyTBAABaseNodeImpl(I, BaseNode);
+  auto InsertResult = TBAABaseNodes.insert({BaseNode, Result});
+  (void)InsertResult;
+  assert(InsertResult.second && "We just checked!");
+  return Result;
+}
+
+TBAAVerifier::TBAABaseNodeSummary
+TBAAVerifier::verifyTBAABaseNodeImpl(Instruction &I, const MDNode *BaseNode) {
+  const TBAAVerifier::TBAABaseNodeSummary InvalidNode = {true, ~0u};
+
+  if (BaseNode->getNumOperands() == 2) {
+    // Scalar nodes can only be accessed at offset 0.
+    return isValidScalarTBAANode(BaseNode)
+               ? TBAAVerifier::TBAABaseNodeSummary({false, 0})
+               : InvalidNode;
+  }
+
+  if (BaseNode->getNumOperands() % 2 != 1) {
+    CheckFailed("Struct tag nodes must have an odd number of operands!",
+                BaseNode);
+    return InvalidNode;
+  }
+
+  if (!isa<MDString>(BaseNode->getOperand(0))) {
+    CheckFailed("Struct tag nodes have a string as their first operand",
+                BaseNode);
+    return InvalidNode;
+  }
+
+  bool Failed = false;
+
+  Optional<APInt> PrevOffset;
+  unsigned BitWidth = ~0u;
+
+  // We've already checked that BaseNode is not a degenerate root node with one
+  // operand in \c verifyTBAABaseNode, so this loop should run at least once.
+  for (unsigned Idx = 1; Idx < BaseNode->getNumOperands(); Idx += 2) {
+    const MDOperand &FieldTy = BaseNode->getOperand(Idx);
+    const MDOperand &FieldOffset = BaseNode->getOperand(Idx + 1);
+    if (!isa<MDNode>(FieldTy)) {
+      CheckFailed("Incorrect field entry in struct type node!", &I, BaseNode);
+      Failed = true;
+      continue;
+    }
+
+    auto *OffsetEntryCI =
+        mdconst::dyn_extract_or_null<ConstantInt>(FieldOffset);
+    if (!OffsetEntryCI) {
+      CheckFailed("Offset entries must be constants!", &I, BaseNode);
+      Failed = true;
+      continue;
+    }
+
+    if (BitWidth == ~0u)
+      BitWidth = OffsetEntryCI->getBitWidth();
+
+    if (OffsetEntryCI->getBitWidth() != BitWidth) {
+      CheckFailed(
+          "Bitwidth between the offsets and struct type entries must match", &I,
+          BaseNode);
+      Failed = true;
+      continue;
+    }
+
+    // NB! As far as I can tell, we generate a non-strictly increasing offset
+    // sequence only from structs that have zero size bit fields.  When
+    // recursing into a contained struct in \c getFieldNodeFromTBAABaseNode we
+    // pick the field lexically the latest in struct type metadata node.  This
+    // mirrors the actual behavior of the alias analysis implementation.
+    bool IsAscending =
+        !PrevOffset || PrevOffset->ule(OffsetEntryCI->getValue());
+
+    if (!IsAscending) {
+      CheckFailed("Offsets must be increasing!", &I, BaseNode);
+      Failed = true;
+    }
+
+    PrevOffset = OffsetEntryCI->getValue();
+  }
+
+  return Failed ? InvalidNode
+                : TBAAVerifier::TBAABaseNodeSummary(false, BitWidth);
+}
+
+static bool IsRootTBAANode(const MDNode *MD) {
+  return MD->getNumOperands() < 2;
+}
+
+static bool IsScalarTBAANodeImpl(const MDNode *MD,
+                                 SmallPtrSetImpl<const MDNode *> &Visited) {
+  if (MD->getNumOperands() != 2 && MD->getNumOperands() != 3)
+    return false;
+
+  if (!isa<MDString>(MD->getOperand(0)))
+    return false;
+
+  if (MD->getNumOperands() == 3) {
+    auto *Offset = mdconst::dyn_extract<ConstantInt>(MD->getOperand(2));
+    if (!(Offset && Offset->isZero() && isa<MDString>(MD->getOperand(0))))
+      return false;
+  }
+
+  auto *Parent = dyn_cast_or_null<MDNode>(MD->getOperand(1));
+  return Parent && Visited.insert(Parent).second &&
+         (IsRootTBAANode(Parent) || IsScalarTBAANodeImpl(Parent, Visited));
+}
+
+bool TBAAVerifier::isValidScalarTBAANode(const MDNode *MD) {
+  auto ResultIt = TBAAScalarNodes.find(MD);
+  if (ResultIt != TBAAScalarNodes.end())
+    return ResultIt->second;
+
+  SmallPtrSet<const MDNode *, 4> Visited;
+  bool Result = IsScalarTBAANodeImpl(MD, Visited);
+  auto InsertResult = TBAAScalarNodes.insert({MD, Result});
+  (void)InsertResult;
+  assert(InsertResult.second && "Just checked!");
+
+  return Result;
+}
+
+/// Returns the field node at the offset \p Offset in \p BaseNode.  Update \p
+/// Offset in place to be the offset within the field node returned.
+///
+/// We assume we've okayed \p BaseNode via \c verifyTBAABaseNode.
+MDNode *TBAAVerifier::getFieldNodeFromTBAABaseNode(Instruction &I,
+                                                   const MDNode *BaseNode,
+                                                   APInt &Offset) {
+  assert(BaseNode->getNumOperands() >= 2 && "Invalid base node!");
+
+  // Scalar nodes have only one possible "field" -- their parent in the access
+  // hierarchy.  Offset must be zero at this point, but our caller is supposed
+  // to Assert that.
+  if (BaseNode->getNumOperands() == 2)
+    return cast<MDNode>(BaseNode->getOperand(1));
+
+  for (unsigned Idx = 1; Idx < BaseNode->getNumOperands(); Idx += 2) {
+    auto *OffsetEntryCI =
+        mdconst::extract<ConstantInt>(BaseNode->getOperand(Idx + 1));
+    if (OffsetEntryCI->getValue().ugt(Offset)) {
+      if (Idx == 1) {
+        CheckFailed("Could not find TBAA parent in struct type node", &I,
+                    BaseNode, &Offset);
+        return nullptr;
+      }
+
+      auto *PrevOffsetEntryCI =
+          mdconst::extract<ConstantInt>(BaseNode->getOperand(Idx - 1));
+      Offset -= PrevOffsetEntryCI->getValue();
+      return cast<MDNode>(BaseNode->getOperand(Idx - 2));
+    }
+  }
+
+  auto *LastOffsetEntryCI = mdconst::extract<ConstantInt>(
+      BaseNode->getOperand(BaseNode->getNumOperands() - 1));
+
+  Offset -= LastOffsetEntryCI->getValue();
+  return cast<MDNode>(BaseNode->getOperand(BaseNode->getNumOperands() - 2));
+}
+
+bool TBAAVerifier::visitTBAAMetadata(Instruction &I, const MDNode *MD) {
+  AssertTBAA(isa<LoadInst>(I) || isa<StoreInst>(I) || isa<CallInst>(I) ||
+                 isa<VAArgInst>(I) || isa<AtomicRMWInst>(I) ||
+                 isa<AtomicCmpXchgInst>(I),
+             "TBAA is only for loads, stores and calls!", &I);
+
+  bool IsStructPathTBAA =
+      isa<MDNode>(MD->getOperand(0)) && MD->getNumOperands() >= 3;
+
+  AssertTBAA(
+      IsStructPathTBAA,
+      "Old-style TBAA is no longer allowed, use struct-path TBAA instead", &I);
+
+  AssertTBAA(MD->getNumOperands() < 5,
+             "Struct tag metadata must have either 3 or 4 operands", &I, MD);
+
+  MDNode *BaseNode = dyn_cast_or_null<MDNode>(MD->getOperand(0));
+  MDNode *AccessType = dyn_cast_or_null<MDNode>(MD->getOperand(1));
+
+  if (MD->getNumOperands() == 4) {
+    auto *IsImmutableCI =
+        mdconst::dyn_extract_or_null<ConstantInt>(MD->getOperand(3));
+    AssertTBAA(IsImmutableCI,
+               "Immutability tag on struct tag metadata must be a constant", &I,
+               MD);
+    AssertTBAA(
+        IsImmutableCI->isZero() || IsImmutableCI->isOne(),
+        "Immutability part of the struct tag metadata must be either 0 or 1",
+        &I, MD);
+  }
+
+  AssertTBAA(BaseNode && AccessType,
+             "Malformed struct tag metadata:  base and access-type "
+             "should be non-null and point to Metadata nodes",
+             &I, MD, BaseNode, AccessType);
+
+  AssertTBAA(isValidScalarTBAANode(AccessType),
+             "Access type node must be a valid scalar type", &I, MD,
+             AccessType);
+
+  auto *OffsetCI = mdconst::dyn_extract_or_null<ConstantInt>(MD->getOperand(2));
+  AssertTBAA(OffsetCI, "Offset must be constant integer", &I, MD);
+
+  APInt Offset = OffsetCI->getValue();
+  bool SeenAccessTypeInPath = false;
+
+  SmallPtrSet<MDNode *, 4> StructPath;
+
+  for (/* empty */; BaseNode && !IsRootTBAANode(BaseNode);
+       BaseNode = getFieldNodeFromTBAABaseNode(I, BaseNode, Offset)) {
+    if (!StructPath.insert(BaseNode).second) {
+      CheckFailed("Cycle detected in struct path", &I, MD);
+      return false;
+    }
+
+    bool Invalid;
+    unsigned BaseNodeBitWidth;
+    std::tie(Invalid, BaseNodeBitWidth) = verifyTBAABaseNode(I, BaseNode);
+
+    // If the base node is invalid in itself, then we've already printed all the
+    // errors we wanted to print.
+    if (Invalid)
+      return false;
+
+    SeenAccessTypeInPath |= BaseNode == AccessType;
+
+    if (isValidScalarTBAANode(BaseNode) || BaseNode == AccessType)
+      AssertTBAA(Offset == 0, "Offset not zero at the point of scalar access",
+                 &I, MD, &Offset);
+
+    AssertTBAA(BaseNodeBitWidth == Offset.getBitWidth() ||
+                   (BaseNodeBitWidth == 0 && Offset == 0),
+               "Access bit-width not the same as description bit-width", &I, MD,
+               BaseNodeBitWidth, Offset.getBitWidth());
+  }
+
+  AssertTBAA(SeenAccessTypeInPath, "Did not see access type in access path!",
+             &I, MD);
+  return true;
+}
+
 char VerifierLegacyPass::ID = 0;
 INITIALIZE_PASS(VerifierLegacyPass, "verify", "Module Verifier", false, false)
 
@@ -4459,7 +4792,7 @@ FunctionPass *llvm::createVerifierPass(bool FatalErrors) {
   return new VerifierLegacyPass(FatalErrors);
 }
 
-char VerifierAnalysis::PassID;
+AnalysisKey VerifierAnalysis::Key;
 VerifierAnalysis::Result VerifierAnalysis::run(Module &M,
                                                ModuleAnalysisManager &) {
   Result Res;

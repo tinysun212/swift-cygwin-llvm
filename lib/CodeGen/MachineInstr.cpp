@@ -274,6 +274,8 @@ bool MachineOperand::isIdenticalTo(const MachineOperand &Other) const {
     return getIntrinsicID() == Other.getIntrinsicID();
   case MachineOperand::MO_Predicate:
     return getPredicate() == Other.getPredicate();
+  case MachineOperand::MO_Placeholder:
+    return true;
   }
   llvm_unreachable("Invalid machine operand type");
 }
@@ -322,6 +324,8 @@ hash_code llvm::hash_value(const MachineOperand &MO) {
     return hash_combine(MO.getType(), MO.getTargetFlags(), MO.getIntrinsicID());
   case MachineOperand::MO_Predicate:
     return hash_combine(MO.getType(), MO.getTargetFlags(), MO.getPredicate());
+  case MachineOperand::MO_Placeholder:
+    return hash_combine();
   }
   llvm_unreachable("Invalid machine operand type");
 }
@@ -403,6 +407,11 @@ void MachineOperand::print(raw_ostream &OS, ModuleSlotTracker &MST,
       bool Unused;
       APF.convert(APFloat::IEEEsingle(), APFloat::rmNearestTiesToEven, &Unused);
       OS << "half " << APF.convertToFloat();
+    } else if (getFPImm()->getType()->isFP128Ty()) {
+      APFloat APF = getFPImm()->getValueAPF();
+      SmallString<16> Str;
+      getFPImm()->getValueAPF().toString(Str);
+      OS << "quad " << Str;
     } else {
       OS << getFPImm()->getValueAPF().convertToDouble();
     }
@@ -491,7 +500,11 @@ void MachineOperand::print(raw_ostream &OS, ModuleSlotTracker &MST,
     auto Pred = static_cast<CmpInst::Predicate>(getPredicate());
     OS << '<' << (CmpInst::isIntPredicate(Pred) ? "intpred" : "floatpred")
        << CmpInst::getPredicateName(Pred) << '>';
+    break;
   }
+  case MachineOperand::MO_Placeholder:
+    OS << "<placeholder>";
+    break;
   }
   if (unsigned TF = getTargetFlags())
     OS << "[TF=" << TF << ']';
@@ -1692,14 +1705,14 @@ void MachineInstr::copyImplicitOps(MachineFunction &MF,
   }
 }
 
-LLVM_DUMP_METHOD void MachineInstr::dump(const TargetInstrInfo *TII) const {
 #if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
+LLVM_DUMP_METHOD void MachineInstr::dump(const TargetInstrInfo *TII) const {
   dbgs() << "  ";
   print(dbgs(), false /* SkipOpers */, TII);
-#endif
 }
+#endif
 
-void MachineInstr::print(raw_ostream &OS, bool SkipOpers,
+void MachineInstr::print(raw_ostream &OS, bool SkipOpers, bool SkipDebugLoc,
                          const TargetInstrInfo *TII) const {
   const Module *M = nullptr;
   if (const MachineBasicBlock *MBB = getParent())
@@ -1707,11 +1720,12 @@ void MachineInstr::print(raw_ostream &OS, bool SkipOpers,
       M = MF->getFunction()->getParent();
 
   ModuleSlotTracker MST(M);
-  print(OS, MST, SkipOpers, TII);
+  print(OS, MST, SkipOpers, SkipDebugLoc, TII);
 }
 
 void MachineInstr::print(raw_ostream &OS, ModuleSlotTracker &MST,
-                         bool SkipOpers, const TargetInstrInfo *TII) const {
+                         bool SkipOpers, bool SkipDebugLoc,
+                         const TargetInstrInfo *TII) const {
   // We can be a bit tidier if we know the MachineFunction.
   const MachineFunction *MF = nullptr;
   const TargetRegisterInfo *TRI = nullptr;
@@ -1987,6 +2001,8 @@ void MachineInstr::print(raw_ostream &OS, ModuleSlotTracker &MST,
     }
     if (isIndirectDebugValue())
       OS << " indirect";
+  } else if (SkipDebugLoc) {
+    return;
   } else if (debugLoc && MF) {
     if (!HaveSemi)
       OS << ";";

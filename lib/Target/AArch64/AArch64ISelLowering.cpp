@@ -554,8 +554,6 @@ AArch64TargetLowering::AArch64TargetLowering(const TargetMachine &TM,
 
   setSchedulingPreference(Sched::Hybrid);
 
-  // Enable TBZ/TBNZ
-  MaskAndBranchFoldingIsLegal = true;
   EnableExtLdPromotion = true;
 
   // Set required alignment.
@@ -3155,7 +3153,8 @@ AArch64TargetLowering::LowerCall(CallLoweringInfo &CLI,
     }
 
     if (VA.isRegLoc()) {
-      if (realArgIdx == 0 && Flags.isReturned() && Outs[0].VT == MVT::i64) {
+      if (realArgIdx == 0 && Flags.isReturned() && !Flags.isSwiftSelf() &&
+          Outs[0].VT == MVT::i64) {
         assert(VA.getLocVT() == MVT::i64 &&
                "unexpected calling convention register assignment");
         assert(!Ins.empty() && Ins[0].VT == MVT::i64 &&
@@ -6592,19 +6591,13 @@ FailedModImm:
     SDValue Op0 = Op.getOperand(0);
     unsigned ElemSize = VT.getScalarSizeInBits();
     unsigned i = 0;
-    // For 32 and 64 bit types, use INSERT_SUBREG for lane zero to
+    // For 32 and 64 bit types, use SCALAR_TO_VECTOR for lane zero to
     // a) Avoid a RMW dependency on the full vector register, and
     // b) Allow the register coalescer to fold away the copy if the
-    //    value is already in an S or D register.
-    // Do not do this for UNDEF/LOAD nodes because we have better patterns
-    // for those avoiding the SCALAR_TO_VECTOR/BUILD_VECTOR.
-    if (!Op0.isUndef() && Op0.getOpcode() != ISD::LOAD &&
-        (ElemSize == 32 || ElemSize == 64)) {
-      unsigned SubIdx = ElemSize == 32 ? AArch64::ssub : AArch64::dsub;
-      MachineSDNode *N =
-          DAG.getMachineNode(TargetOpcode::INSERT_SUBREG, dl, VT, Vec, Op0,
-                             DAG.getTargetConstant(SubIdx, dl, MVT::i32));
-      Vec = SDValue(N, 0);
+    //    value is already in an S or D register, and we're forced to emit an
+    //    INSERT_SUBREG that we can't fold anywhere.
+    if (!Op0.isUndef() && (ElemSize == 32 || ElemSize == 64)) {
+      Vec = DAG.getNode(ISD::SCALAR_TO_VECTOR, dl, VT, Op0);
       ++i;
     }
     for (; i < NumElts; ++i) {
@@ -8934,8 +8927,9 @@ static SDValue splitStoreSplat(SelectionDAG &DAG, StoreSDNode &St,
   // instructions (stp).
   SDLoc DL(&St);
   SDValue BasePtr = St.getBasePtr();
+  const MachinePointerInfo &PtrInfo = St.getPointerInfo();
   SDValue NewST1 =
-      DAG.getStore(St.getChain(), DL, SplatVal, BasePtr, St.getPointerInfo(),
+      DAG.getStore(St.getChain(), DL, SplatVal, BasePtr, PtrInfo,
                    OrigAlignment, St.getMemOperand()->getFlags());
 
   unsigned Offset = EltOffset;
@@ -8944,7 +8938,7 @@ static SDValue splitStoreSplat(SelectionDAG &DAG, StoreSDNode &St,
     SDValue OffsetPtr = DAG.getNode(ISD::ADD, DL, MVT::i64, BasePtr,
                                     DAG.getConstant(Offset, DL, MVT::i64));
     NewST1 = DAG.getStore(NewST1.getValue(0), DL, SplatVal, OffsetPtr,
-                          St.getPointerInfo(), Alignment,
+                          PtrInfo.getWithOffset(Offset), Alignment,
                           St.getMemOperand()->getFlags());
     Offset += EltOffset;
   }
@@ -10653,6 +10647,19 @@ Value *AArch64TargetLowering::getSafeStackPointerLocation(IRBuilder<> &IRB) cons
       Type::getInt8PtrTy(IRB.getContext())->getPointerTo(0));
 }
 
+bool AArch64TargetLowering::isMaskAndCmp0FoldingBeneficial(
+    const Instruction &AndI) const {
+  // Only sink 'and' mask to cmp use block if it is masking a single bit, since
+  // this is likely to be fold the and/cmp/br into a single tbz instruction.  It
+  // may be beneficial to sink in other cases, but we would have to check that
+  // the cmp would not get folded into the br to form a cbz for these to be
+  // beneficial.
+  ConstantInt* Mask = dyn_cast<ConstantInt>(AndI.getOperand(1));
+  if (!Mask)
+    return false;
+  return Mask->getUniqueInteger().isPowerOf2();
+}
+
 void AArch64TargetLowering::initializeSplitCSR(MachineBasicBlock *Entry) const {
   // Update IsSplitCSR in AArch64unctionInfo.
   AArch64FunctionInfo *AFI = Entry->getParent()->getInfo<AArch64FunctionInfo>();
@@ -10711,4 +10718,12 @@ bool AArch64TargetLowering::isIntDivCheap(EVT VT, AttributeSet Attr) const {
   bool OptSize =
       Attr.hasAttribute(AttributeSet::FunctionIndex, Attribute::MinSize);
   return OptSize && !VT.isVector();
+}
+
+unsigned
+AArch64TargetLowering::getVaListSizeInBits(const DataLayout &DL) const {
+  if (Subtarget->isTargetDarwin())
+    return getPointerTy(DL).getSizeInBits();
+
+  return 3 * getPointerTy(DL).getSizeInBits() + 2 * 32;
 }

@@ -46,6 +46,7 @@ enum ActionType {
   GenAttributes,
   GenSearchableTables,
   GenGlobalISel,
+  GenRegisterBank,
 };
 
 namespace {
@@ -94,11 +95,14 @@ namespace {
                     clEnumValN(GenSearchableTables, "gen-searchable-tables",
                                "Generate generic binary-searchable table"),
                     clEnumValN(GenGlobalISel, "gen-global-isel",
-                               "Generate GlobalISel selector")));
+                               "Generate GlobalISel selector"),
+                    clEnumValN(GenRegisterBank, "gen-register-bank",
+                               "Generate registers bank descriptions")));
 
+  cl::OptionCategory PrintEnumsCat("Options for -print-enums");
   cl::opt<std::string>
   Class("class", cl::desc("Print Enum list for this class"),
-          cl::value_desc("class name"));
+        cl::value_desc("class name"), cl::cat(PrintEnumsCat));
 
 bool LLVMTableGenMain(raw_ostream &OS, RecordKeeper &Records) {
   switch (Action) {
@@ -182,6 +186,9 @@ bool LLVMTableGenMain(raw_ostream &OS, RecordKeeper &Records) {
     break;
   case GenGlobalISel:
     EmitGlobalISel(Records, OS);
+    break;
+  case GenRegisterBank:
+    EmitRegisterBank(Records, OS);
     break;
   }
 

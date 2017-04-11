@@ -598,8 +598,8 @@ PreservedAnalyses GVN::run(Function &F, FunctionAnalysisManager &AM) {
   return PA;
 }
 
-LLVM_DUMP_METHOD
-void GVN::dump(DenseMap<uint32_t, Value*>& d) {
+#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
+LLVM_DUMP_METHOD void GVN::dump(DenseMap<uint32_t, Value*>& d) {
   errs() << "{\n";
   for (DenseMap<uint32_t, Value*>::iterator I = d.begin(),
        E = d.end(); I != E; ++I) {
@@ -608,6 +608,7 @@ void GVN::dump(DenseMap<uint32_t, Value*>& d) {
   }
   errs() << "}\n";
 }
+#endif
 
 /// Return true if we can prove that the value
 /// we're analyzing is fully available in the specified block.  As we go, keep
@@ -1713,7 +1714,7 @@ bool GVN::processNonLocalLoad(LoadInst *LI) {
       // If instruction I has debug info, then we should not update it.
       // Also, if I has a null DebugLoc, then it is still potentially incorrect
       // to propagate LI's DebugLoc because LI may not post-dominate I.
-      if (LI->getDebugLoc() && ValuesPerBlock.size() != 1)
+      if (LI->getDebugLoc() && LI->getParent() == I->getParent())
         I->setDebugLoc(LI->getDebugLoc());
     if (V->getType()->getScalarType()->isPointerTy())
       MD->invalidateCachedPointerInfo(V);
@@ -1795,7 +1796,7 @@ static void patchReplacementInstruction(Instruction *I, Value *Repl) {
 
   // Patch the replacement so that it is not more restrictive than the value
   // being replaced.
-  // Note that if 'I' is a load being replaced by some operation, 
+  // Note that if 'I' is a load being replaced by some operation,
   // for example, by an arithmetic operation, then andIRFlags()
   // would just erase all math flags from the original arithmetic
   // operation, which is clearly not wanted and not needed.

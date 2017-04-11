@@ -4448,6 +4448,11 @@ bool X86TargetLowering::isCtlzFast() const {
   return Subtarget.hasFastLZCNT();
 }
 
+bool X86TargetLowering::isMaskAndCmp0FoldingBeneficial(
+    const Instruction &AndI) const {
+  return true;
+}
+
 bool X86TargetLowering::hasAndNotCompare(SDValue Y) const {
   if (!Subtarget.hasBMI())
     return false;
@@ -6376,7 +6381,7 @@ static SDValue EltsFromConsecutiveLoads(EVT VT, ArrayRef<SDValue> Elts,
   return SDValue();
 }
 
-static Constant *getConstantVector(MVT VT, APInt SplatValue,
+static Constant *getConstantVector(MVT VT, const APInt &SplatValue,
                                    unsigned SplatBitSize, LLVMContext &C) {
   unsigned ScalarSize = VT.getScalarSizeInBits();
   unsigned NumElm = SplatBitSize / ScalarSize;
@@ -8009,7 +8014,7 @@ static unsigned getV4X86ShuffleImm(ArrayRef<int> Mask) {
   return Imm;
 }
 
-static SDValue getV4X86ShuffleImm8ForMask(ArrayRef<int> Mask, SDLoc DL,
+static SDValue getV4X86ShuffleImm8ForMask(ArrayRef<int> Mask, const SDLoc &DL,
                                           SelectionDAG &DAG) {
   return DAG.getConstant(getV4X86ShuffleImm(Mask), DL, MVT::i8);
 }
@@ -8096,8 +8101,8 @@ static SmallBitVector computeZeroableShuffleElements(ArrayRef<int> Mask,
 //
 // The function looks for a sub-mask that the nonzero elements are in
 // increasing order. If such sub-mask exist. The function returns true.
-static bool isNonZeroElementsInOrder(const SmallBitVector Zeroable,
-                                     ArrayRef<int> Mask,const EVT &VectorType,
+static bool isNonZeroElementsInOrder(const SmallBitVector &Zeroable,
+                                     ArrayRef<int> Mask, const EVT &VectorType,
                                      bool &IsZeroSideLeft) {
   int NextElement = -1;
   // Check if the Mask's nonzero elements are in increasing order.
@@ -9612,7 +9617,16 @@ static SDValue lowerVectorShuffleAsBroadcast(const SDLoc &DL, MVT VT,
     if (((BroadcastIdx * EltSize) % 128) != 0)
       return SDValue();
 
-    MVT ExtVT = MVT::getVectorVT(VT.getScalarType(), 128 / EltSize);
+    // The shuffle input might have been a bitcast we looked through; look at
+    // the original input vector.  Emit an EXTRACT_SUBVECTOR of that type; we'll
+    // later bitcast it to BroadcastVT.
+    MVT SrcVT = V.getSimpleValueType();
+    assert(SrcVT.getScalarSizeInBits() == BroadcastVT.getScalarSizeInBits() &&
+           "Unexpected vector element size");
+    assert(SrcVT.getVectorNumElements() == BroadcastVT.getVectorNumElements() &&
+           "Unexpected vector num elements");
+
+    MVT ExtVT = MVT::getVectorVT(SrcVT.getScalarType(), 128 / EltSize);
     V = DAG.getNode(ISD::EXTRACT_SUBVECTOR, DL, ExtVT, V,
                     DAG.getIntPtrConstant(BroadcastIdx, DL));
   }
@@ -12895,7 +12909,7 @@ static SDValue lowerV8F64VectorShuffle(const SDLoc &DL, ArrayRef<int> Mask,
 }
 
 /// \brief Handle lowering of 16-lane 32-bit floating point shuffles.
-static SDValue lowerV16F32VectorShuffle(SDLoc DL, ArrayRef<int> Mask,
+static SDValue lowerV16F32VectorShuffle(const SDLoc &DL, ArrayRef<int> Mask,
                                         const SmallBitVector &Zeroable,
                                         SDValue V1, SDValue V2,
                                         const X86Subtarget &Subtarget,
@@ -28788,10 +28802,12 @@ static SDValue combineExtractVectorElt(SDNode *N, SelectionDAG &DAG,
   return SDValue();
 }
 
-/// If a vector select has an operand that is -1 or 0, simplify the select to a
-/// bitwise logic operation.
-static SDValue combineVSelectWithAllOnesOrZeros(SDNode *N, SelectionDAG &DAG,
-                                                const X86Subtarget &Subtarget) {
+/// If a vector select has an operand that is -1 or 0, try to simplify the
+/// select to a bitwise logic operation.
+static SDValue
+combineVSelectWithAllOnesOrZeros(SDNode *N, SelectionDAG &DAG,
+                                 TargetLowering::DAGCombinerInfo &DCI,
+                                 const X86Subtarget &Subtarget) {
   SDValue Cond = N->getOperand(0);
   SDValue LHS = N->getOperand(1);
   SDValue RHS = N->getOperand(2);
@@ -28853,18 +28869,28 @@ static SDValue combineVSelectWithAllOnesOrZeros(SDNode *N, SelectionDAG &DAG,
     }
   }
 
-  if (!TValIsAllOnes && !FValIsAllZeros)
+  // vselect Cond, 111..., 000... -> Cond
+  if (TValIsAllOnes && FValIsAllZeros)
+    return DAG.getBitcast(VT, Cond);
+
+  if (!DCI.isBeforeLegalize() && !TLI.isTypeLegal(CondVT))
     return SDValue();
 
-  SDValue Ret;
-  if (TValIsAllOnes && FValIsAllZeros)
-    Ret = Cond;
-  else if (TValIsAllOnes)
-    Ret = DAG.getNode(ISD::OR, DL, CondVT, Cond, DAG.getBitcast(CondVT, RHS));
-  else if (FValIsAllZeros)
-    Ret = DAG.getNode(ISD::AND, DL, CondVT, Cond, DAG.getBitcast(CondVT, LHS));
+  // vselect Cond, 111..., X -> or Cond, X
+  if (TValIsAllOnes) {
+    SDValue CastRHS = DAG.getBitcast(CondVT, RHS);
+    SDValue Or = DAG.getNode(ISD::OR, DL, CondVT, Cond, CastRHS);
+    return DAG.getBitcast(VT, Or);
+  }
 
-  return DAG.getBitcast(VT, Ret);
+  // vselect Cond, X, 000... -> and Cond, X
+  if (FValIsAllZeros) {
+    SDValue CastLHS = DAG.getBitcast(CondVT, LHS);
+    SDValue And = DAG.getNode(ISD::AND, DL, CondVT, Cond, CastLHS);
+    return DAG.getBitcast(VT, And);
+  }
+
+  return SDValue();
 }
 
 static SDValue combineSelectOfTwoConstants(SDNode *N, SelectionDAG &DAG) {
@@ -29353,7 +29379,7 @@ static SDValue combineSelect(SDNode *N, SelectionDAG &DAG,
     }
   }
 
-  if (SDValue V = combineVSelectWithAllOnesOrZeros(N, DAG, Subtarget))
+  if (SDValue V = combineVSelectWithAllOnesOrZeros(N, DAG, DCI, Subtarget))
     return V;
 
   // If this is a *dynamic* select (non-constant condition) and we can match
@@ -31260,93 +31286,6 @@ static SDValue foldVectorXorShiftIntoCmp(SDNode *N, SelectionDAG &DAG,
   return DAG.getNode(X86ISD::PCMPGT, SDLoc(N), VT, Shift.getOperand(0), Ones);
 }
 
-/// Check if truncation with saturation form type \p SrcVT to \p DstVT
-/// is valid for the given \p Subtarget.
-static bool isSATValidOnAVX512Subtarget(EVT SrcVT, EVT DstVT,
-                                        const X86Subtarget &Subtarget) {
-  if (!Subtarget.hasAVX512())
-    return false;
-
-  // FIXME: Scalar type may be supported if we move it to vector register.
-  if (!SrcVT.isVector() || !SrcVT.isSimple() || SrcVT.getSizeInBits() > 512)
-    return false;
-
-  EVT SrcElVT = SrcVT.getScalarType();
-  EVT DstElVT = DstVT.getScalarType();
-  if (SrcElVT.getSizeInBits() < 16 || SrcElVT.getSizeInBits() > 64)
-    return false;
-  if (DstElVT.getSizeInBits() < 8 || DstElVT.getSizeInBits() > 32)
-    return false;
-  if (SrcVT.is512BitVector() || Subtarget.hasVLX())
-    return SrcElVT.getSizeInBits() >= 32 || Subtarget.hasBWI();
-  return false;
-}
-
-/// Return true if VPACK* instruction can be used for the given types
-/// and it is avalable on \p Subtarget.
-static bool
-isSATValidOnSSESubtarget(EVT SrcVT, EVT DstVT, const X86Subtarget &Subtarget) {
-  if (Subtarget.hasSSE2())
-    // v16i16 -> v16i8
-    if (SrcVT == MVT::v16i16 && DstVT == MVT::v16i8)
-      return true;
-  if (Subtarget.hasSSE41())
-    // v8i32 -> v8i16
-    if (SrcVT == MVT::v8i32 && DstVT == MVT::v8i16)
-      return true;
-  return false;
-}
-
-/// Detect a pattern of truncation with saturation:
-/// (truncate (umin (x, unsigned_max_of_dest_type)) to dest_type).
-/// Return the source value to be truncated or SDValue() if the pattern was not
-/// matched.
-static SDValue detectUSatPattern(SDValue In, EVT VT) {
-  if (In.getOpcode() != ISD::UMIN)
-    return SDValue();
-
-  //Saturation with truncation. We truncate from InVT to VT.
-  assert(In.getScalarValueSizeInBits() > VT.getScalarSizeInBits() &&
-    "Unexpected types for truncate operation");
-
-  APInt C;
-  if (ISD::isConstantSplatVector(In.getOperand(1).getNode(), C)) {
-    // C should be equal to UINT32_MAX / UINT16_MAX / UINT8_MAX according
-    // the element size of the destination type.
-    return APIntOps::isMask(VT.getScalarSizeInBits(), C) ? In.getOperand(0) :
-      SDValue();
-  }
-  return SDValue();
-}
-
-/// Detect a pattern of truncation with saturation:
-/// (truncate (umin (x, unsigned_max_of_dest_type)) to dest_type).
-/// The types should allow to use VPMOVUS* instruction on AVX512.
-/// Return the source value to be truncated or SDValue() if the pattern was not
-/// matched.
-static SDValue detectAVX512USatPattern(SDValue In, EVT VT,
-                                       const X86Subtarget &Subtarget) {
-  if (!isSATValidOnAVX512Subtarget(In.getValueType(), VT, Subtarget))
-    return SDValue();
-  return detectUSatPattern(In, VT);
-}
-
-static SDValue
-combineTruncateWithUSat(SDValue In, EVT VT, SDLoc &DL, SelectionDAG &DAG,
-                        const X86Subtarget &Subtarget) {
-  SDValue USatVal = detectUSatPattern(In, VT);
-  if (USatVal) {
-    if (isSATValidOnAVX512Subtarget(In.getValueType(), VT, Subtarget))
-      return DAG.getNode(X86ISD::VTRUNCUS, DL, VT, USatVal);
-    if (isSATValidOnSSESubtarget(In.getValueType(), VT, Subtarget)) {
-      SDValue Lo, Hi;
-      std::tie(Lo, Hi) = DAG.SplitVector(USatVal, DL);
-      return DAG.getNode(X86ISD::PACKUS, DL, VT, Lo, Hi);
-    }
-  }
-  return SDValue();
-}
-
 /// This function detects the AVG pattern between vectors of unsigned i8/i16,
 /// which is c = (a + b + 1) / 2, and replace this operation with the efficient
 /// X86ISD::AVG instruction.
@@ -31912,12 +31851,6 @@ static SDValue combineStore(SDNode *N, SelectionDAG &DAG,
       return DAG.getStore(St->getChain(), dl, Avg, St->getBasePtr(),
                           St->getPointerInfo(), St->getAlignment(),
                           St->getMemOperand()->getFlags());
-
-    if (SDValue Val =
-        detectAVX512USatPattern(St->getValue(), St->getMemoryVT(), Subtarget))
-      return EmitTruncSStore(false /* Unsigned saturation */, St->getChain(),
-                             dl, Val, St->getBasePtr(),
-                             St->getMemoryVT(), St->getMemOperand(), DAG);
 
     const TargetLowering &TLI = DAG.getTargetLoweringInfo();
     unsigned NumElems = VT.getVectorNumElements();
@@ -32538,10 +32471,6 @@ static SDValue combineTruncate(SDNode *N, SelectionDAG &DAG,
   // Try to detect AVG pattern first.
   if (SDValue Avg = detectAVGPattern(Src, VT, DAG, Subtarget, DL))
     return Avg;
-
-  // Try to combine truncation with unsigned saturation.
-  if (SDValue Val = combineTruncateWithUSat(Src, VT, DL, DAG, Subtarget))
-    return Val;
 
   // The bitcast source is a direct mmx result.
   // Detect bitcasts between i32 to x86mmx
@@ -33778,11 +33707,11 @@ static SDValue combineSub(SDNode *N, SelectionDAG &DAG,
     }
   }
 
-  // Try to synthesize horizontal adds from adds of shuffles.
+  // Try to synthesize horizontal subs from subs of shuffles.
   EVT VT = N->getValueType(0);
   if (((Subtarget.hasSSSE3() && (VT == MVT::v8i16 || VT == MVT::v4i32)) ||
        (Subtarget.hasInt256() && (VT == MVT::v16i16 || VT == MVT::v8i32))) &&
-      isHorizontalBinOp(Op0, Op1, true))
+      isHorizontalBinOp(Op0, Op1, false))
     return DAG.getNode(X86ISD::HSUB, SDLoc(N), VT, Op0, Op1);
 
   return OptimizeConditionalInDecrement(N, DAG);

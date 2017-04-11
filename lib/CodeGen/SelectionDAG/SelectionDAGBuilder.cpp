@@ -2583,6 +2583,7 @@ void SelectionDAGBuilder::visitBinary(const User &I, unsigned OpCode) {
   Flags.setVectorReduction(vec_redux);
   if (EnableFMFInDAG) {
     Flags.setAllowReciprocal(FMF.allowReciprocal());
+    Flags.setAllowContract(FMF.allowContract());
     Flags.setNoInfs(FMF.noInfs());
     Flags.setNoNaNs(FMF.noNaNs());
     Flags.setNoSignedZeros(FMF.noSignedZeros());
@@ -4764,7 +4765,7 @@ bool SelectionDAGBuilder::EmitFuncArgumentDbgValue(
 SDDbgValue *SelectionDAGBuilder::getDbgValue(SDValue N,
                                              DILocalVariable *Variable,
                                              DIExpression *Expr, int64_t Offset,
-                                             DebugLoc dl,
+                                             const DebugLoc &dl,
                                              unsigned DbgSDNodeOrder) {
   SDDbgValue *SDV;
   auto *FISDN = dyn_cast<FrameIndexSDNode>(N.getNode());
@@ -5832,6 +5833,15 @@ void SelectionDAGBuilder::LowerCallTo(ImmutableCallSite CS, SDValue Callee,
 
   const Value *SwiftErrorVal = nullptr;
   const TargetLowering &TLI = DAG.getTargetLoweringInfo();
+
+  // We can't tail call inside a function with a swifterror argument. Lowering
+  // does not support this yet. It would have to move into the swifterror
+  // register before the call.
+  auto *Caller = CS.getInstruction()->getParent()->getParent();
+  if (TLI.supportSwiftError() &&
+      Caller->getAttributes().hasAttrSomewhere(Attribute::SwiftError))
+    isTailCall = false;
+
   for (ImmutableCallSite::arg_iterator i = CS.arg_begin(), e = CS.arg_end();
        i != e; ++i) {
     const Value *V = *i;

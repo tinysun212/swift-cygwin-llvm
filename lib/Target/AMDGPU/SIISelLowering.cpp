@@ -842,12 +842,18 @@ SDValue SITargetLowering::LowerFormalArguments(
   if (!AMDGPU::isShader(CallConv)) {
     assert(Info->hasWorkGroupIDX() && Info->hasWorkItemIDX());
   } else {
-    assert(!Info->hasPrivateSegmentBuffer() && !Info->hasDispatchPtr() &&
+    assert(!Info->hasDispatchPtr() &&
            !Info->hasKernargSegmentPtr() && !Info->hasFlatScratchInit() &&
            !Info->hasWorkGroupIDX() && !Info->hasWorkGroupIDY() &&
            !Info->hasWorkGroupIDZ() && !Info->hasWorkGroupInfo() &&
            !Info->hasWorkItemIDX() && !Info->hasWorkItemIDY() &&
            !Info->hasWorkItemIDZ());
+  }
+
+  if (Info->hasPrivateMemoryInputPtr()) {
+    unsigned PrivateMemoryPtrReg = Info->addPrivateMemoryPtr(*TRI);
+    MF.addLiveIn(PrivateMemoryPtrReg, &AMDGPU::SReg_64RegClass);
+    CCInfo.AllocateReg(PrivateMemoryPtrReg);
   }
 
   // FIXME: How should these inputs interact with inreg / custom SGPR inputs?
@@ -908,7 +914,7 @@ SDValue SITargetLowering::LowerFormalArguments(
     if (VA.isMemLoc()) {
       VT = Ins[i].VT;
       EVT MemVT = VA.getLocVT();
-      const unsigned Offset = Subtarget->getExplicitKernelArgOffset() +
+      const unsigned Offset = Subtarget->getExplicitKernelArgOffset(MF) +
                               VA.getLocMemOffset();
       // The first 36 bytes of the input buffer contains information about
       // thread group and global sizes.
@@ -1033,7 +1039,7 @@ SDValue SITargetLowering::LowerFormalArguments(
   if (getTargetMachine().getOptLevel() == CodeGenOpt::None)
     HasStackObjects = true;
 
-  if (ST.isAmdCodeObjectV2()) {
+  if (ST.isAmdCodeObjectV2(MF)) {
     if (HasStackObjects) {
       // If we have stack objects, we unquestionably need the private buffer
       // resource. For the Code Object V2 ABI, this will be the first 4 user
@@ -2213,9 +2219,10 @@ SITargetLowering::isOffsetFoldingLegal(const GlobalAddressSDNode *GA) const {
          !shouldEmitGOTReloc(GA->getGlobal());
 }
 
-static SDValue buildPCRelGlobalAddress(SelectionDAG &DAG, const GlobalValue *GV,
-                                      SDLoc DL, unsigned Offset, EVT PtrVT,
-                                      unsigned GAFlags = SIInstrInfo::MO_NONE) {
+static SDValue
+buildPCRelGlobalAddress(SelectionDAG &DAG, const GlobalValue *GV,
+                        const SDLoc &DL, unsigned Offset, EVT PtrVT,
+                        unsigned GAFlags = SIInstrInfo::MO_NONE) {
   // In order to support pc-relative addressing, the PC_ADD_REL_OFFSET SDNode is
   // lowered to the following code sequence:
   //
@@ -2333,7 +2340,8 @@ SDValue SITargetLowering::lowerImplicitZextParam(SelectionDAG &DAG,
                      DAG.getValueType(VT));
 }
 
-static SDValue emitNonHSAIntrinsicError(SelectionDAG& DAG, SDLoc DL, EVT VT) {
+static SDValue emitNonHSAIntrinsicError(SelectionDAG &DAG, const SDLoc &DL,
+                                        EVT VT) {
   DiagnosticInfoUnsupported BadIntrin(*DAG.getMachineFunction().getFunction(),
                                       "non-hsa intrinsic with hsa target",
                                       DL.getDebugLoc());
@@ -2341,7 +2349,8 @@ static SDValue emitNonHSAIntrinsicError(SelectionDAG& DAG, SDLoc DL, EVT VT) {
   return DAG.getUNDEF(VT);
 }
 
-static SDValue emitRemovedIntrinsicError(SelectionDAG& DAG, SDLoc DL, EVT VT) {
+static SDValue emitRemovedIntrinsicError(SelectionDAG &DAG, const SDLoc &DL,
+                                         EVT VT) {
   DiagnosticInfoUnsupported BadIntrin(*DAG.getMachineFunction().getFunction(),
                                       "intrinsic not supported on subtarget",
                                       DL.getDebugLoc());
@@ -2362,9 +2371,13 @@ SDValue SITargetLowering::LowerINTRINSIC_WO_CHAIN(SDValue Op,
   // TODO: Should this propagate fast-math-flags?
 
   switch (IntrinsicID) {
+  case Intrinsic::amdgcn_implicit_buffer_ptr: {
+    unsigned Reg = TRI->getPreloadedValue(MF, SIRegisterInfo::PRIVATE_SEGMENT_BUFFER);
+    return CreateLiveInRegister(DAG, &AMDGPU::SReg_64RegClass, Reg, VT);
+  }
   case Intrinsic::amdgcn_dispatch_ptr:
   case Intrinsic::amdgcn_queue_ptr: {
-    if (!Subtarget->isAmdCodeObjectV2()) {
+    if (!Subtarget->isAmdCodeObjectV2(MF)) {
       DiagnosticInfoUnsupported BadIntrin(
           *MF.getFunction(), "unsupported hsa intrinsic without hsa target",
           DL.getDebugLoc());

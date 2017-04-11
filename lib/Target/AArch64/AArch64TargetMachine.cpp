@@ -14,7 +14,9 @@
 #include "AArch64CallLowering.h"
 #include "AArch64InstructionSelector.h"
 #include "AArch64LegalizerInfo.h"
+#ifdef LLVM_BUILD_GLOBAL_ISEL
 #include "AArch64RegisterBankInfo.h"
+#endif
 #include "AArch64Subtarget.h"
 #include "AArch64TargetMachine.h"
 #include "AArch64TargetObjectFile.h"
@@ -135,6 +137,11 @@ static cl::opt<bool>
     EnableLoopDataPrefetch("aarch64-enable-loop-data-prefetch", cl::Hidden,
                            cl::desc("Enable the loop data prefetch pass"),
                            cl::init(true));
+
+static cl::opt<int> EnableGlobalISelAtO(
+    "aarch64-enable-global-isel-at-O", cl::Hidden,
+    cl::desc("Enable GlobalISel at or below an opt level (-1 to disable)"),
+    cl::init(-1));
 
 extern "C" void LLVMInitializeAArch64Target() {
   // Register the target.
@@ -341,6 +348,8 @@ public:
   void addPostRegAlloc() override;
   void addPreSched2() override;
   void addPreEmitPass() override;
+
+  bool isGlobalISelEnabled() const override;
 };
 
 } // end anonymous namespace
@@ -449,6 +458,10 @@ bool AArch64PassConfig::addGlobalInstructionSelect() {
   return false;
 }
 #endif
+
+bool AArch64PassConfig::isGlobalISelEnabled() const {
+  return TM->getOptLevel() <= EnableGlobalISelAtO;
+}
 
 bool AArch64PassConfig::addILPOpts() {
   if (EnableCondOpt)

@@ -27,6 +27,7 @@
 #include "llvm/CodeGen/MachineJumpTableInfo.h"
 #include "llvm/CodeGen/MachineLoopInfo.h"
 #include "llvm/CodeGen/MachineModuleInfoImpls.h"
+#include "llvm/CodeGen/MachineOptimizationRemarkEmitter.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DebugInfo.h"
 #include "llvm/IR/Mangler.h"
@@ -171,6 +172,7 @@ void AsmPrinter::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.setPreservesAll();
   MachineFunctionPass::getAnalysisUsage(AU);
   AU.addRequired<MachineModuleInfo>();
+  AU.addRequired<MachineOptimizationRemarkEmitterPass>();
   AU.addRequired<GCModuleInfo>();
   if (isVerbose())
     AU.addRequired<MachineLoopInfo>();
@@ -567,6 +569,15 @@ void AsmPrinter::EmitGlobalVariable(const GlobalVariable *GV) {
   OutStreamer->AddBlankLine();
 }
 
+/// Emit the directive and value for debug thread local expression
+///
+/// \p Value - The value to emit.
+/// \p Size - The size of the integer (in bytes) to emit.
+void AsmPrinter::EmitDebugValue(const MCExpr *Value,
+                                      unsigned Size) const {
+  OutStreamer->EmitValue(Value, Size);
+}
+
 /// EmitFunctionHeader - This method emits the header for the current
 /// function.
 void AsmPrinter::EmitFunctionHeader() {
@@ -874,6 +885,7 @@ void AsmPrinter::EmitFunctionBody() {
 
   // Print out code for the function.
   bool HasAnyRealCode = false;
+  int NumInstsInFunction = 0;
   for (auto &MBB : *MF) {
     // Print a label for the basic block.
     EmitBasicBlockStart(MBB);
@@ -883,7 +895,7 @@ void AsmPrinter::EmitFunctionBody() {
       if (!MI.isPosition() && !MI.isImplicitDef() && !MI.isKill() &&
           !MI.isDebugValue()) {
         HasAnyRealCode = true;
-        ++EmittedInsts;
+        ++NumInstsInFunction;
       }
 
       if (ShouldPrintDebugScopes) {
@@ -943,6 +955,14 @@ void AsmPrinter::EmitFunctionBody() {
 
     EmitBasicBlockEnd(MBB);
   }
+
+  EmittedInsts += NumInstsInFunction;
+  MachineOptimizationRemarkAnalysis R(DEBUG_TYPE, "InstructionCount",
+                                      MF->getFunction()->getSubprogram(),
+                                      &MF->front());
+  R << ore::NV("NumInstructions", NumInstsInFunction)
+    << " instructions in function";
+  ORE->emit(R);
 
   // If the function is empty and the object file uses .subsections_via_symbols,
   // then we need to emit *something* to the function body to prevent the
@@ -1302,6 +1322,7 @@ void AsmPrinter::SetupMachineFunction(MachineFunction &MF) {
       CurrentFnSymForSize = CurrentFnBegin;
   }
 
+  ORE = &getAnalysis<MachineOptimizationRemarkEmitterPass>().getORE();
   if (isVerbose())
     LI = &getAnalysis<MachineLoopInfo>();
 }

@@ -295,8 +295,9 @@ void ARMConstantIslands::verify() {
 #endif
 }
 
+#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
 /// print block size and offset information - debugging
-void ARMConstantIslands::dumpBBs() {
+LLVM_DUMP_METHOD void ARMConstantIslands::dumpBBs() {
   DEBUG({
     for (unsigned J = 0, E = BBInfo.size(); J !=E; ++J) {
       const BasicBlockInfo &BBI = BBInfo[J];
@@ -308,6 +309,7 @@ void ARMConstantIslands::dumpBBs() {
     }
   });
 }
+#endif
 
 /// createARMConstantIslandPass - returns an instance of the constpool
 /// island pass.
@@ -2060,6 +2062,12 @@ bool ARMConstantIslands::optimizeThumb2JumpTables() {
       IdxReg = Shift->getOperand(2).getReg();
       unsigned ShiftedIdxReg = Shift->getOperand(0).getReg();
 
+      // It's important that IdxReg is live until the actual TBB/TBH. Most of
+      // the range is checked later, but the LEA might still clobber it and not
+      // actually get removed.
+      if (BaseReg == IdxReg && !jumpTableFollowsTB(MI, User.CPEMI))
+        continue;
+
       MachineInstr *Load = User.MI->getNextNode();
       if (Load->getOpcode() != ARM::tLDRr)
         continue;
@@ -2085,15 +2093,14 @@ bool ARMConstantIslands::optimizeThumb2JumpTables() {
         if (Load->getOperand(0).getReg() != MI->getOperand(0).getReg())
           continue;
       }
-      
-      
+
       // Now safe to delete the load and lsl. The LEA will be removed later.
       CanDeleteLEA = true;
       Shift->eraseFromParent();
       Load->eraseFromParent();
       DeadSize += 4;
     }
-    
+
     DEBUG(dbgs() << "Shrink JT: " << *MI);
     MachineInstr *CPEMI = User.CPEMI;
     unsigned Opc = ByteOk ? ARM::t2TBB_JT : ARM::t2TBH_JT;

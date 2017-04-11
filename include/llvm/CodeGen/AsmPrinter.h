@@ -46,6 +46,7 @@ class MachineLoop;
 class MachineConstantPoolValue;
 class MachineJumpTableInfo;
 class MachineModuleInfo;
+class MachineOptimizationRemarkEmitter;
 class MCAsmInfo;
 class MCCFIInstruction;
 class MCContext;
@@ -88,6 +89,9 @@ public:
 
   /// This is a pointer to the current MachineModuleInfo.
   MachineModuleInfo *MMI;
+
+  /// Optimization remark emitter.
+  MachineOptimizationRemarkEmitter *ORE;
 
   /// The symbol for the current function. This is recalculated at the beginning
   /// of each call to runOnMachineFunction().
@@ -479,6 +483,12 @@ public:
 
   /// Get the value for DW_AT_APPLE_isa. Zero if no isa encoding specified.
   virtual unsigned getISAEncoding() { return 0; }
+
+  /// Emit the directive and value for debug thread local expression
+  ///
+  /// \p Value - The value to emit.
+  /// \p Size - The size of the integer (in bytes) to emit.
+  virtual void EmitDebugValue(const MCExpr *Value, unsigned Size) const;
 
   //===------------------------------------------------------------------===//
   // Dwarf Lowering Routines

@@ -2191,6 +2191,10 @@ otherwise unsafe floating point transformations.
    Allow Reciprocal - Allow optimizations to use the reciprocal of an
    argument rather than perform division.
 
+``contract``
+   Allow floating-point contraction (e.g. fusing a multiply followed by an
+   addition into a fused multiply-and-add).
+
 ``fast``
    Fast - Allow algebraically equivalent transformations that may
    dramatically change results in floating point (e.g. reassociate). This
@@ -3997,7 +4001,7 @@ DIFile
 
 ``DIFile`` nodes represent files. The ``filename:`` can include slashes.
 
-.. code-block:: llvm
+.. code-block:: none
 
     !0 = !DIFile(filename: "path/to/file", directory: "/path/to/dir",
                  checksumkind: CSK_MD5,
@@ -4343,6 +4347,10 @@ The current supported vocabulary is limited:
 - ``DW_OP_plus, 93`` adds ``93`` to the working expression.
 - ``DW_OP_bit_piece, 16, 8`` specifies the offset and size (``16`` and ``8``
   here, respectively) of the variable piece from the working expression.
+- ``DW_OP_swap`` swaps top two stack entries.
+- ``DW_OP_xderef`` provides extended dereference mechanism. The entry at the top
+  of the stack is treated as an address. The second stack entry is treated as an
+  address space identifier.
 
 .. code-block:: text
 
@@ -4350,6 +4358,7 @@ The current supported vocabulary is limited:
     !1 = !DIExpression(DW_OP_plus, 3)
     !2 = !DIExpression(DW_OP_bit_piece, 3, 7)
     !3 = !DIExpression(DW_OP_deref, DW_OP_plus, 3, DW_OP_bit_piece, 3, 7)
+    !4 = !DIExpression(DW_OP_constu, 2, DW_OP_swap, DW_OP_xderef)
 
 DIObjCProperty
 """"""""""""""

@@ -512,7 +512,7 @@ private:
   }
 
   Metadata *getFnMetadataByID(unsigned ID) {
-    return MDLoader->getMetadataFwdRef(ID);
+    return MDLoader->getMetadataFwdRefOrLoad(ID);
   }
 
   BasicBlock *getBasicBlock(unsigned ID) const {
@@ -971,6 +971,8 @@ static FastMathFlags getDecodedFastMathFlags(unsigned Val) {
     FMF.setNoSignedZeros();
   if (0 != (Val & FastMathFlags::AllowReciprocal))
     FMF.setAllowReciprocal();
+  if (0 != (Val & FastMathFlags::AllowContract))
+    FMF.setAllowContract(true);
   return FMF;
 }
 

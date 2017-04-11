@@ -395,16 +395,15 @@ public:
   /// \brief Return if the target supports combining a
   /// chain like:
   /// \code
-  ///   %andResult = and %val1, #imm-with-one-bit-set;
+  ///   %andResult = and %val1, #mask
   ///   %icmpResult = icmp %andResult, 0
-  ///   br i1 %icmpResult, label %dest1, label %dest2
   /// \endcode
   /// into a single machine instruction of a form like:
   /// \code
-  ///   brOnBitSet %register, #bitNumber, dest
+  ///   cc = test %register, #mask
   /// \endcode
-  bool isMaskAndBranchFoldingLegal() const {
-    return MaskAndBranchFoldingIsLegal;
+  virtual bool isMaskAndCmp0FoldingBeneficial(const Instruction &AndI) const {
+    return false;
   }
 
   /// Return true if the target should transform:
@@ -987,6 +986,11 @@ public:
     return GatherAllAliasesMaxDepth;
   }
 
+  /// Returns the size of the platform's va_list object.
+  virtual unsigned getVaListSizeInBits(const DataLayout &DL) const {
+    return getPointerTy(DL).getSizeInBits();
+  }
+
   /// \brief Get maximum # of store operations permitted for llvm.memset
   ///
   /// This function returns the maximum number of store operations permitted
@@ -1490,7 +1494,8 @@ protected:
   void computeRegisterProperties(const TargetRegisterInfo *TRI);
 
   /// Indicate that the specified operation does not work with the specified
-  /// type and indicate what to do about it.
+  /// type and indicate what to do about it. Note that VT may refer to either
+  /// the type of a result or that of an operand of Op.
   void setOperationAction(unsigned Op, MVT VT,
                           LegalizeAction Action) {
     assert(Op < array_lengthof(OpActions[0]) && "Table isn't big enough!");
@@ -2196,10 +2201,6 @@ protected:
   /// Tells the code generator that select is more expensive than a branch if
   /// the branch is usually predicted right.
   bool PredictableSelectIsExpensive;
-
-  /// MaskAndBranchFoldingIsLegal - Indicates if the target supports folding
-  /// a mask of a single bit, a compare, and a branch into a single instruction.
-  bool MaskAndBranchFoldingIsLegal;
 
   /// \see enableExtLdPromotion.
   bool EnableExtLdPromotion;

@@ -56,17 +56,20 @@ endif()
 
 # This should only apply if you are both on an Apple host, and targeting Apple.
 if(CMAKE_HOST_APPLE AND APPLE)
-  if(NOT CMAKE_XCRUN)
-    find_program(CMAKE_XCRUN NAMES xcrun)
-  endif()
-  if(CMAKE_XCRUN)
-    execute_process(COMMAND ${CMAKE_XCRUN} -find libtool
-      OUTPUT_VARIABLE CMAKE_LIBTOOL
-      OUTPUT_STRIP_TRAILING_WHITESPACE)
-  endif()
+  # if CMAKE_LIBTOOL is not set, try and find it with xcrun or find_program
+  if(NOT CMAKE_LIBTOOL)
+    if(NOT CMAKE_XCRUN)
+      find_program(CMAKE_XCRUN NAMES xcrun)
+    endif()
+    if(CMAKE_XCRUN)
+      execute_process(COMMAND ${CMAKE_XCRUN} -find libtool
+        OUTPUT_VARIABLE CMAKE_LIBTOOL
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+    endif()
 
-  if(NOT CMAKE_LIBTOOL OR NOT EXISTS CMAKE_LIBTOOL)
-    find_program(CMAKE_LIBTOOL NAMES libtool)
+    if(NOT CMAKE_LIBTOOL OR NOT EXISTS CMAKE_LIBTOOL)
+      find_program(CMAKE_LIBTOOL NAMES libtool)
+    endif()
   endif()
 
   get_property(languages GLOBAL PROPERTY ENABLED_LANGUAGES)
@@ -178,10 +181,12 @@ if(LLVM_DEPENDENCY_DEBUGGING)
   endif()
 endif()
 
-option(LLVM_BUILD_GLOBAL_ISEL "Experimental: Build GlobalISel" OFF)
+option(LLVM_BUILD_GLOBAL_ISEL "Experimental: Build GlobalISel" ON)
 if(LLVM_BUILD_GLOBAL_ISEL)
   add_definitions(-DLLVM_BUILD_GLOBAL_ISEL)
 endif()
+
+option(LLVM_ENABLE_DAGISEL_COV "Debug: Prints tablegen patterns that were used for selecting" OFF)
 
 set(LLVM_PARALLEL_LINK_JOBS "" CACHE STRING
   "Define the maximum number of concurrent link jobs.")
@@ -413,9 +418,6 @@ option(LLVM_ENABLE_EXPENSIVE_CHECKS "Enable expensive checks" OFF)
 
 set(LLVM_ABI_BREAKING_CHECKS "WITH_ASSERTS" CACHE STRING
   "Enable abi-breaking checks.  Can be WITH_ASSERTS, FORCE_ON or FORCE_OFF.")
-
-option(LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING
-  "Disable abi-breaking checks mismatch detection at link-tim." OFF)
 
 option(LLVM_FORCE_USE_OLD_HOST_TOOLCHAIN
        "Set to ON to force using an old, unsupported host toolchain." OFF)

@@ -1475,6 +1475,13 @@ void ModuleBitcodeWriter::writeDIDerivedType(const DIDerivedType *N,
   Record.push_back(N->getFlags());
   Record.push_back(VE.getMetadataOrNullID(N->getExtraData()));
 
+  // DWARF address space is encoded as N->getDWARFAddressSpace() + 1. 0 means
+  // that there is no DWARF address space associated with DIDerivedType.
+  if (const auto &DWARFAddressSpace = N->getDWARFAddressSpace())
+    Record.push_back(*DWARFAddressSpace + 1);
+  else
+    Record.push_back(0);
+
   Stream.EmitRecord(bitc::METADATA_DERIVED_TYPE, Record, Abbrev);
   Record.clear();
 }
@@ -1551,6 +1558,7 @@ void ModuleBitcodeWriter::writeDICompileUnit(const DICompileUnit *N,
   Record.push_back(N->getDWOId());
   Record.push_back(VE.getMetadataOrNullID(N->getMacros().get()));
   Record.push_back(N->getSplitDebugInlining());
+  Record.push_back(N->getDebugInfoForProfiling());
 
   Stream.EmitRecord(bitc::METADATA_COMPILE_UNIT, Record, Abbrev);
   Record.clear();
@@ -1580,6 +1588,7 @@ void ModuleBitcodeWriter::writeDISubprogram(const DISubprogram *N,
   Record.push_back(VE.getMetadataOrNullID(N->getDeclaration()));
   Record.push_back(VE.getMetadataOrNullID(N->getVariables().get()));
   Record.push_back(N->getThisAdjustment());
+  Record.push_back(VE.getMetadataOrNullID(N->getThrownTypes().get()));
 
   Stream.EmitRecord(bitc::METADATA_SUBPROGRAM, Record, Abbrev);
   Record.clear();
@@ -1615,9 +1624,7 @@ void ModuleBitcodeWriter::writeDINamespace(const DINamespace *N,
                                            unsigned Abbrev) {
   Record.push_back(N->isDistinct() | N->getExportSymbols() << 1);
   Record.push_back(VE.getMetadataOrNullID(N->getScope()));
-  Record.push_back(VE.getMetadataOrNullID(N->getFile()));
   Record.push_back(VE.getMetadataOrNullID(N->getRawName()));
-  Record.push_back(N->getLine());
 
   Stream.EmitRecord(bitc::METADATA_NAMESPACE, Record, Abbrev);
   Record.clear();
@@ -1740,9 +1747,8 @@ void ModuleBitcodeWriter::writeDIExpression(const DIExpression *N,
                                             SmallVectorImpl<uint64_t> &Record,
                                             unsigned Abbrev) {
   Record.reserve(N->getElements().size() + 1);
-
-  const uint64_t HasOpFragmentFlag = 1 << 1;
-  Record.push_back((uint64_t)N->isDistinct() | HasOpFragmentFlag);
+  const uint64_t Version = 2 << 1;
+  Record.push_back((uint64_t)N->isDistinct() | Version);
   Record.append(N->elements_begin(), N->elements_end());
 
   Stream.EmitRecord(bitc::METADATA_EXPRESSION, Record, Abbrev);

@@ -483,7 +483,7 @@ LowerLOAD(SDValue Op, SelectionDAG &DAG) const {
   Args.push_back(Entry);
 
   TargetLowering::CallLoweringInfo CLI(DAG);
-  CLI.setDebugLoc(DL).setChain(Chain).setCallee(
+  CLI.setDebugLoc(DL).setChain(Chain).setLibCallee(
       CallingConv::C, IntPtrTy,
       DAG.getExternalSymbol("__misaligned_load",
                             getPointerTy(DAG.getDataLayout())),
@@ -1605,7 +1605,7 @@ SDValue XCoreTargetLowering::PerformDAGCombine(SDNode *N,
         TargetLowering::TargetLoweringOpt TLO(DAG, !DCI.isBeforeLegalize(),
                                               !DCI.isBeforeLegalizeOps());
         const TargetLowering &TLI = DAG.getTargetLoweringInfo();
-        if (TLO.ShrinkDemandedConstant(OutVal, DemandedMask) ||
+        if (TLI.ShrinkDemandedConstant(OutVal, DemandedMask, TLO) ||
             TLI.SimplifyDemandedBits(OutVal, DemandedMask, KnownZero, KnownOne,
                                      TLO))
           DCI.CommitTargetLoweringOpt(TLO);
@@ -1622,7 +1622,7 @@ SDValue XCoreTargetLowering::PerformDAGCombine(SDNode *N,
         TargetLowering::TargetLoweringOpt TLO(DAG, !DCI.isBeforeLegalize(),
                                               !DCI.isBeforeLegalizeOps());
         const TargetLowering &TLI = DAG.getTargetLoweringInfo();
-        if (TLO.ShrinkDemandedConstant(Time, DemandedMask) ||
+        if (TLI.ShrinkDemandedConstant(Time, DemandedMask, TLO) ||
             TLI.SimplifyDemandedBits(Time, DemandedMask, KnownZero, KnownOne,
                                      TLO))
           DCI.CommitTargetLoweringOpt(TLO);

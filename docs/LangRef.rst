@@ -4336,29 +4336,41 @@ parameter, and it will be included in the ``variables:`` field of its
 DIExpression
 """"""""""""
 
-``DIExpression`` nodes represent DWARF expression sequences. They are used in
-:ref:`debug intrinsics<dbg_intrinsics>` (such as ``llvm.dbg.declare``) to
-describe how the referenced LLVM variable relates to the source language
-variable.
+``DIExpression`` nodes represent expressions that are inspired by the DWARF
+expression language. They are used in :ref:`debug intrinsics<dbg_intrinsics>`
+(such as ``llvm.dbg.declare`` and ``llvm.dbg.value``) to describe how the
+referenced LLVM variable relates to the source language variable.
 
 The current supported vocabulary is limited:
 
-- ``DW_OP_deref`` dereferences the working expression.
+- ``DW_OP_deref`` dereferences the top of the expression stack.
 - ``DW_OP_plus, 93`` adds ``93`` to the working expression.
-- ``DW_OP_bit_piece, 16, 8`` specifies the offset and size (``16`` and ``8``
-  here, respectively) of the variable piece from the working expression.
+- ``DW_OP_LLVM_fragment, 16, 8`` specifies the offset and size (``16`` and ``8``
+  here, respectively) of the variable fragment from the working expression. Note
+  that contrary to DW_OP_bit_piece, the offset is describing the the location
+  within the described source variable.
 - ``DW_OP_swap`` swaps top two stack entries.
 - ``DW_OP_xderef`` provides extended dereference mechanism. The entry at the top
   of the stack is treated as an address. The second stack entry is treated as an
   address space identifier.
+- ``DW_OP_stack_value`` marks a constant value.
 
-.. code-block:: text
+DWARF specifies three kinds of simple location descriptions: Register, memory,
+and implicit location descriptions. Register and memory location descriptions
+describe the *location* of a source variable (in the sense that a debugger might
+modify its value), whereas implicit locations describe merely the *value* of a
+source variable. DIExpressions also follow this model: A DIExpression that
+doesn't have a trailing ``DW_OP_stack_value`` will describe an *address* when
+combined with a concrete location.
+
+.. code-block:: llvm
 
     !0 = !DIExpression(DW_OP_deref)
     !1 = !DIExpression(DW_OP_plus, 3)
     !2 = !DIExpression(DW_OP_bit_piece, 3, 7)
-    !3 = !DIExpression(DW_OP_deref, DW_OP_plus, 3, DW_OP_bit_piece, 3, 7)
+    !3 = !DIExpression(DW_OP_deref, DW_OP_plus, 3, DW_OP_LLVM_fragment, 3, 7)
     !4 = !DIExpression(DW_OP_constu, 2, DW_OP_swap, DW_OP_xderef)
+    !5 = !DIExpression(DW_OP_constu, 42, DW_OP_stack_value)
 
 DIObjCProperty
 """"""""""""""

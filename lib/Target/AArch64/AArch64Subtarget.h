@@ -73,6 +73,7 @@ protected:
 
   // StrictAlign - Disallow unaligned memory accesses.
   bool StrictAlign = false;
+  unsigned MinVectorRegisterBitWidth = 128;
   bool UseAA = false;
   bool PredictableSelectIsExpensive = false;
   bool BalanceFPOps = false;
@@ -176,6 +177,10 @@ public:
 
   bool isXRaySupported() const override { return true; }
 
+  unsigned getMinVectorRegisterBitWidth() const {
+    return MinVectorRegisterBitWidth;
+  }
+
   bool isX18Reserved() const { return ReserveX18; }
   bool hasFPARMv8() const { return HasFPARMv8; }
   bool hasNEON() const { return HasNEON; }
@@ -245,6 +250,9 @@ public:
   /// how a global value should be referenced for the current subtarget.
   unsigned char ClassifyGlobalReference(const GlobalValue *GV,
                                         const TargetMachine &TM) const;
+
+  unsigned char classifyGlobalFunctionReference(const GlobalValue *GV,
+                                                const TargetMachine &TM) const;
 
   /// This function returns the name of a function which has an interface
   /// like the non-standard bzero function, if such a function exists on

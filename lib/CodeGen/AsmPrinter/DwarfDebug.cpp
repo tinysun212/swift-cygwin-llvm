@@ -200,6 +200,12 @@ const DIType *DbgVariable::getType() const {
 }
 
 ArrayRef<DbgVariable::FrameIndexExpr> DbgVariable::getFrameIndexExprs() const {
+  if (FrameIndexExprs.size() == 1)
+    return FrameIndexExprs;
+
+  assert(all_of(FrameIndexExprs,
+                [](const FrameIndexExpr &A) { return A.Expr->isFragment(); }) &&
+         "multiple FI expressions without DW_OP_LLVM_fragment");
   std::sort(FrameIndexExprs.begin(), FrameIndexExprs.end(),
             [](const FrameIndexExpr &A, const FrameIndexExpr &B) -> bool {
               return A.Expr->getFragmentInfo()->OffsetInBits <
@@ -1048,7 +1054,7 @@ void DwarfDebug::beginInstruction(const MachineInstr *MI) {
   assert(CurMI);
 
   // Check if source location changes, but ignore DBG_VALUE and CFI locations.
-  if (MI->isDebugValue() || MI->isCFIInstruction())
+  if (MI->isMetaInstruction())
     return;
   const DebugLoc &DL = MI->getDebugLoc();
   // When we emit a line-0 record, we don't update PrevInstLoc; so look at
@@ -1130,7 +1136,7 @@ static DebugLoc findPrologueEndLoc(const MachineFunction *MF) {
   // the beginning of the function body.
   for (const auto &MBB : *MF)
     for (const auto &MI : MBB)
-      if (!MI.isDebugValue() && !MI.getFlag(MachineInstr::FrameSetup) &&
+      if (!MI.isMetaInstruction() && !MI.getFlag(MachineInstr::FrameSetup) &&
           MI.getDebugLoc())
         return MI.getDebugLoc();
   return DebugLoc();
@@ -1223,7 +1229,7 @@ void DwarfDebug::endFunction(const MachineFunction *MF) {
   // Under -gmlt, skip building the subprogram if there are no inlined
   // subroutines inside it. But with -fdebug-info-for-profiling, the subprogram
   // is still needed as we need its source location.
-  if (!Asm->TM.Options.DebugInfoForProfiling &&
+  if (!TheCU.getCUNode()->getDebugInfoForProfiling() &&
       TheCU.getCUNode()->getEmissionKind() == DICompileUnit::LineTablesOnly &&
       LScopes.getAbstractScopesList().empty() && !IsDarwin) {
     assert(InfoHolder.getScopeVariables().empty());
@@ -1509,8 +1515,9 @@ static void emitDebugLocValue(const AsmPrinter &AP, const DIBasicType *BT,
                               ByteStreamer &Streamer,
                               const DebugLocEntry::Value &Value,
                               DwarfExpression &DwarfExpr) {
-  DIExpressionCursor ExprCursor(Value.getExpression());
-  DwarfExpr.addFragmentOffset(Value.getExpression());
+  auto *DIExpr = Value.getExpression();
+  DIExpressionCursor ExprCursor(DIExpr);
+  DwarfExpr.addFragmentOffset(DIExpr);
   // Regular entry.
   if (Value.isInt()) {
     if (BT && (BT->getEncoding() == dwarf::DW_ATE_signed ||
@@ -1519,12 +1526,20 @@ static void emitDebugLocValue(const AsmPrinter &AP, const DIBasicType *BT,
     else
       DwarfExpr.addUnsignedConstant(Value.getInt());
   } else if (Value.isLocation()) {
-    MachineLocation Loc = Value.getLoc();
+    MachineLocation Location = Value.getLoc();
+    if (Location.isIndirect())
+      DwarfExpr.setMemoryLocationKind();
+    SmallVector<uint64_t, 8> Ops;
+    if (Location.isIndirect() && Location.getOffset()) {
+      Ops.push_back(dwarf::DW_OP_plus);
+      Ops.push_back(Location.getOffset());
+    }
+    Ops.append(DIExpr->elements_begin(), DIExpr->elements_end());
+    DIExpressionCursor Cursor(Ops);
     const TargetRegisterInfo &TRI = *AP.MF->getSubtarget().getRegisterInfo();
-    if (Loc.getOffset())
-      DwarfExpr.addMachineRegIndirect(TRI, Loc.getReg(), Loc.getOffset());
-    else
-      DwarfExpr.addMachineRegExpression(TRI, ExprCursor, Loc.getReg());
+    if (!DwarfExpr.addMachineRegExpression(TRI, Cursor, Location.getReg()))
+      return;
+    return DwarfExpr.addExpression(std::move(Cursor));
   } else if (Value.isConstantFP()) {
     APInt RawBytes = Value.getConstantFP()->getValueAPF().bitcastToAPInt();
     DwarfExpr.addUnsignedConstant(RawBytes);

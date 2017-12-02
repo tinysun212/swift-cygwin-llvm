@@ -2279,3 +2279,26 @@ MachineInstrBuilder llvm::BuildMI(MachineBasicBlock &BB,
   BB.insert(I, MI);
   return MachineInstrBuilder(MF, MI);
 }
+
+MachineInstr *llvm::buildDbgValueForSpill(MachineBasicBlock &BB,
+                                          MachineBasicBlock::iterator I,
+                                          const MachineInstr &Orig,
+                                          int FrameIndex) {
+  const MDNode *Var = Orig.getDebugVariable();
+  const auto *Expr = cast_or_null<DIExpression>(Orig.getDebugExpression());
+  bool IsIndirect = Orig.isIndirectDebugValue();
+  uint64_t Offset = IsIndirect ? Orig.getOperand(1).getImm() : 0;
+  DebugLoc DL = Orig.getDebugLoc();
+  assert(cast<DILocalVariable>(Var)->isValidLocationForIntrinsic(DL) &&
+         "Expected inlined-at fields to agree");
+  // If the DBG_VALUE already was a memory location, add an extra
+  // DW_OP_deref. Otherwise just turning this from a register into a
+  // memory/indirect location is sufficient.
+  if (IsIndirect)
+    Expr = DIExpression::prepend(Expr, DIExpression::WithDeref);
+  return BuildMI(BB, I, DL, Orig.getDesc())
+      .addFrameIndex(FrameIndex)
+      .addImm(Offset)
+      .addMetadata(Var)
+      .addMetadata(Expr);
+}

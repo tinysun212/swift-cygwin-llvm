@@ -369,10 +369,6 @@ void DwarfUnit::addSourceLine(DIE &Die, const DIObjCProperty *Ty) {
   addSourceLine(Die, Ty->getLine(), Ty->getFilename(), Ty->getDirectory());
 }
 
-void DwarfUnit::addSourceLine(DIE &Die, const DINamespace *NS) {
-  addSourceLine(Die, NS->getLine(), NS->getFilename(), NS->getDirectory());
-}
-
 /* Byref variables, in Blocks, are declared by the programmer as "SomeType
    VarName;", but the compiler creates a __Block_byref_x_VarName struct, and
    gives the variable VarName either the struct, or a pointer to the struct, as
@@ -465,50 +461,48 @@ void DwarfUnit::addBlockByrefAddress(const DbgVariable &DV, DIE &Die,
   // Decode the original location, and use that as the start of the byref
   // variable's location.
   DIELoc *Loc = new (DIEValueAllocator) DIELoc;
-  SmallVector<uint64_t, 6> DIExpr;
-  DIEDwarfExpression Expr(*Asm, *this, *Loc);
+  DIEDwarfExpression DwarfExpr(*Asm, *this, *Loc);
+  if (Location.isIndirect())
+    DwarfExpr.setMemoryLocationKind();
 
-  bool validReg;
-  if (Location.isReg())
-    validReg = Expr.addMachineReg(*Asm->MF->getSubtarget().getRegisterInfo(),
-                                  Location.getReg());
-  else
-    validReg =
-        Expr.addMachineRegIndirect(*Asm->MF->getSubtarget().getRegisterInfo(),
-                                   Location.getReg(), Location.getOffset());
-
-  if (!validReg)
-    return;
-
+  SmallVector<uint64_t, 9> Ops;
+  if (Location.isIndirect() && Location.getOffset()) {
+    Ops.push_back(dwarf::DW_OP_plus);
+    Ops.push_back(Location.getOffset());
+  }
   // If we started with a pointer to the __Block_byref... struct, then
   // the first thing we need to do is dereference the pointer (DW_OP_deref).
   if (isPointer)
-    DIExpr.push_back(dwarf::DW_OP_deref);
+    Ops.push_back(dwarf::DW_OP_deref);
 
   // Next add the offset for the '__forwarding' field:
   // DW_OP_plus_uconst ForwardingFieldOffset.  Note there's no point in
   // adding the offset if it's 0.
   if (forwardingFieldOffset > 0) {
-    DIExpr.push_back(dwarf::DW_OP_plus);
-    DIExpr.push_back(forwardingFieldOffset);
+    Ops.push_back(dwarf::DW_OP_plus);
+    Ops.push_back(forwardingFieldOffset);
   }
 
   // Now dereference the __forwarding field to get to the real __Block_byref
   // struct:  DW_OP_deref.
-  DIExpr.push_back(dwarf::DW_OP_deref);
+  Ops.push_back(dwarf::DW_OP_deref);
 
   // Now that we've got the real __Block_byref... struct, add the offset
   // for the variable's field to get to the location of the actual variable:
   // DW_OP_plus_uconst varFieldOffset.  Again, don't add if it's 0.
   if (varFieldOffset > 0) {
-    DIExpr.push_back(dwarf::DW_OP_plus);
-    DIExpr.push_back(varFieldOffset);
+    Ops.push_back(dwarf::DW_OP_plus);
+    Ops.push_back(varFieldOffset);
   }
-  Expr.addExpression(makeArrayRef(DIExpr));
-  Expr.finalize();
+
+  DIExpressionCursor Cursor(Ops);
+  const TargetRegisterInfo &TRI = *Asm->MF->getSubtarget().getRegisterInfo();
+  if (!DwarfExpr.addMachineRegExpression(TRI, Cursor, Location.getReg()))
+    return;
+  DwarfExpr.addExpression(std::move(Cursor));
 
   // Now attach the location information to the DIE.
-  addBlock(Die, Attribute, Loc);
+  addBlock(Die, Attribute, DwarfExpr.finalize());
 }
 
 /// Return true if type encoding is unsigned.
@@ -655,6 +649,14 @@ void DwarfUnit::addTemplateParams(DIE &Buffer, DINodeArray TParams) {
       constructTemplateTypeParameterDIE(Buffer, TTP);
     else if (auto *TVP = dyn_cast<DITemplateValueParameter>(Element))
       constructTemplateValueParameterDIE(Buffer, TVP);
+  }
+}
+
+/// Add thrown types.
+void DwarfUnit::addThrownTypes(DIE &Die, DINodeArray ThrownTypes) {
+  for (const auto *Ty : ThrownTypes) {
+    DIE &TT = createAndAddDIE(dwarf::DW_TAG_thrown_type, Die);
+    addType(TT, cast<DIType>(Ty));
   }
 }
 
@@ -843,6 +845,13 @@ void DwarfUnit::constructTypeDIE(DIE &Buffer, const DIDerivedType *DTy) {
   // Add source line info if available and TyDesc is not a forward declaration.
   if (!DTy->isForwardDecl())
     addSourceLine(Buffer, DTy);
+
+  // If DWARF address space value is other than None, add it for pointer and
+  // reference types as DW_AT_address_class.
+  if (DTy->getDWARFAddressSpace() && (Tag == dwarf::DW_TAG_pointer_type ||
+                                      Tag == dwarf::DW_TAG_reference_type))
+    addUInt(Buffer, dwarf::DW_AT_address_class, dwarf::DW_FORM_data4,
+            DTy->getDWARFAddressSpace().getValue());
 }
 
 void DwarfUnit::constructSubprogramArguments(DIE &Buffer, DITypeRefArray Args) {
@@ -1082,7 +1091,6 @@ DIE *DwarfUnit::getOrCreateNameSpace(const DINamespace *NS) {
     Name = "(anonymous namespace)";
   DD->addAccelNamespace(Name, NDie);
   addGlobalName(Name, NDie, NS->getScope());
-  addSourceLine(NDie, NS);
   if (NS->getExportSymbols())
     addFlag(NDie, dwarf::DW_AT_export_symbols);
   return &NDie;
@@ -1192,7 +1200,7 @@ void DwarfUnit::applySubprogramAttributes(const DISubprogram *SP, DIE &SPDie,
   // If -fdebug-info-for-profiling is enabled, need to emit the subprogram
   // and its source location.
   bool SkipSPSourceLocation = SkipSPAttributes &&
-                              !Asm->TM.Options.DebugInfoForProfiling;
+                              !CUNode->getDebugInfoForProfiling();
   if (!SkipSPSourceLocation)
     if (applySubprogramDefinitionAttributes(SP, SPDie))
       return;
@@ -1253,6 +1261,8 @@ void DwarfUnit::applySubprogramAttributes(const DISubprogram *SP, DIE &SPDie,
     // be handled while processing variables.
     constructSubprogramArguments(SPDie, Args);
   }
+
+  addThrownTypes(SPDie, SP->getThrownTypes());
 
   if (SP->isArtificial())
     addFlag(SPDie, dwarf::DW_AT_artificial);

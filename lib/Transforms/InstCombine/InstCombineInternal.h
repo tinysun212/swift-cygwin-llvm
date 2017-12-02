@@ -28,6 +28,9 @@
 #include "llvm/IR/PatternMatch.h"
 #include "llvm/Pass.h"
 #include "llvm/Transforms/InstCombine/InstCombineWorklist.h"
+#include "llvm/Transforms/Utils/Local.h"
+#include "llvm/Support/Dwarf.h"
+#include "llvm/IR/DIBuilder.h"
 
 #define DEBUG_TYPE "instcombine"
 
@@ -313,6 +316,11 @@ public:
   bool replacedSelectWithOperand(SelectInst *SI, const ICmpInst *Icmp,
                                  const unsigned SIOpd);
 
+  /// Try to replace instruction \p I with value \p V which are pointers
+  /// in different address space.
+  /// \return true if successful.
+  bool replacePointer(Instruction &I, Value *V);
+
 private:
   bool ShouldChangeType(unsigned FromBitWidth, unsigned ToBitWidth) const;
   bool ShouldChangeType(Type *From, Type *To) const;
@@ -456,8 +464,9 @@ public:
   /// methods should return the value returned by this function.
   Instruction *eraseInstFromFunction(Instruction &I) {
     DEBUG(dbgs() << "IC: ERASE " << I << '\n');
-
     assert(I.use_empty() && "Cannot erase instruction that is used!");
+    salvageDebugInfo(I);
+
     // Make sure that we reprocess all operands now that we reduced their
     // use counts.
     if (I.getNumOperands() < 8) {

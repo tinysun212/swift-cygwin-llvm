@@ -25,13 +25,14 @@
 
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/CodeGen/DAGCombine.h"
 #include "llvm/CodeGen/ISDOpcodes.h"
 #include "llvm/CodeGen/MachineValueType.h"
 #include "llvm/CodeGen/RuntimeLibcalls.h"
+#include "llvm/CodeGen/SelectionDAG.h"
 #include "llvm/CodeGen/SelectionDAGNodes.h"
 #include "llvm/CodeGen/ValueTypes.h"
 #include "llvm/IR/Attributes.h"
@@ -1958,6 +1959,12 @@ public:
     return LibcallCallingConvs[Call];
   }
 
+  /// Execute target specific actions to finalize target lowering.
+  /// This is used to set extra flags in MachineFrameInformation and freezing
+  /// the set of reserved registers.
+  /// The default implementation just freezes the set of reserved registers.
+  virtual void finalizeLowering(MachineFunction &MF) const;
+
 private:
   const TargetMachine &TM;
 
@@ -2327,29 +2334,38 @@ public:
       New = N;
       return true;
     }
-
-    /// Check to see if the specified operand of the specified instruction is a
-    /// constant integer.  If so, check to see if there are any bits set in the
-    /// constant that are not demanded.  If so, shrink the constant and return
-    /// true.
-    bool ShrinkDemandedConstant(SDValue Op, const APInt &Demanded);
-
-    /// Convert x+y to (VT)((SmallVT)x+(SmallVT)y) if the casts are free.  This
-    /// uses isZExtFree and ZERO_EXTEND for the widening cast, but it could be
-    /// generalized for targets with other types of implicit widening casts.
-    bool ShrinkDemandedOp(SDValue Op, unsigned BitWidth, const APInt &Demanded,
-                          const SDLoc &dl);
-
-    /// Helper for SimplifyDemandedBits that can simplify an operation with
-    /// multiple uses.  This function uses TLI.SimplifyDemandedBits to
-    /// simplify Operand \p OpIdx of \p User and then updated \p User with
-    /// the simplified version.  No other uses of \p OpIdx are updated.
-    /// If \p User is the only user of \p OpIdx, this function behaves exactly
-    /// like TLI.SimplifyDemandedBits except that it also updates the DAG by
-    /// calling DCI.CommitTargetLoweringOpt.
-    bool SimplifyDemandedBits(SDNode *User, unsigned OpIdx,
-                              const APInt &Demanded, DAGCombinerInfo &DCI);
   };
+
+  /// Check to see if the specified operand of the specified instruction is a
+  /// constant integer.  If so, check to see if there are any bits set in the
+  /// constant that are not demanded.  If so, shrink the constant and return
+  /// true.
+  bool ShrinkDemandedConstant(SDValue Op, const APInt &Demanded,
+                              TargetLoweringOpt &TLO) const;
+
+  // Target hook to do target-specific const optimization, which is called by
+  // ShrinkDemandedConstant. This function should return true if the target
+  // doesn't want ShrinkDemandedConstant to further optimize the constant.
+  virtual bool targetShrinkDemandedConstant(SDValue Op, const APInt &Demanded,
+                                            TargetLoweringOpt &TLO) const {
+    return false;
+  }
+
+  /// Convert x+y to (VT)((SmallVT)x+(SmallVT)y) if the casts are free.  This
+  /// uses isZExtFree and ZERO_EXTEND for the widening cast, but it could be
+  /// generalized for targets with other types of implicit widening casts.
+  bool ShrinkDemandedOp(SDValue Op, unsigned BitWidth, const APInt &Demanded,
+                        TargetLoweringOpt &TLO) const;
+
+  /// Helper for SimplifyDemandedBits that can simplify an operation with
+  /// multiple uses.  This function simplifies operand \p OpIdx of \p User and
+  /// then updates \p User with the simplified version. No other uses of
+  /// \p OpIdx are updated. If \p User is the only user of \p OpIdx, this
+  /// function behaves exactly like function SimplifyDemandedBits declared
+  /// below except that it also updates the DAG by calling
+  /// DCI.CommitTargetLoweringOpt.
+  bool SimplifyDemandedBits(SDNode *User, unsigned OpIdx, const APInt &Demanded,
+                            DAGCombinerInfo &DCI, TargetLoweringOpt &TLO) const;
 
   /// Look at Op.  At this point, we know that only the DemandedMask bits of the
   /// result of Op are ever used downstream.  If we can use this information to
@@ -2497,12 +2513,6 @@ public:
     return false;
   }
 
-  /// Return true if the MachineFunction contains a COPY which would imply
-  /// HasCopyImplyingStackAdjustment.
-  virtual bool hasCopyImplyingStackAdjustment(MachineFunction *MF) const {
-    return false;
-  }
-
   /// Perform necessary initialization to handle a subset of CSRs explicitly
   /// via copies. This function is called at the beginning of instruction
   /// selection.
@@ -2561,6 +2571,9 @@ public:
   };
   typedef std::vector<ArgListEntry> ArgListTy;
 
+  virtual void markLibCallAttributes(MachineFunction *MF, unsigned CC,
+                                     ArgListTy &Args) const {};
+
   /// This structure contains all information that is necessary for lowering
   /// calls. It is passed to TLI::LowerCallTo when the SelectionDAG builder
   /// needs to lower a call, and targets will see this struct in their LowerCall
@@ -2607,6 +2620,20 @@ public:
 
     CallLoweringInfo &setChain(SDValue InChain) {
       Chain = InChain;
+      return *this;
+    }
+
+    // setCallee with target/module-specific attributes
+    CallLoweringInfo &setLibCallee(CallingConv::ID CC, Type *ResultType,
+                                   SDValue Target, ArgListTy &&ArgsList) {
+      RetTy = ResultType;
+      Callee = Target;
+      CallConv = CC;
+      NumFixedArgs = Args.size();
+      Args = std::move(ArgsList);
+
+      DAG.getTargetLoweringInfo().markLibCallAttributes(
+          &(DAG.getMachineFunction()), CC, Args);
       return *this;
     }
 

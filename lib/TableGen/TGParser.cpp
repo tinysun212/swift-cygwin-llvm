@@ -51,7 +51,9 @@ struct SubMultiClassReference {
   SubMultiClassReference() : MC(nullptr) {}
 
   bool isInvalid() const { return MC == nullptr; }
-  void dump() const;
+#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
+LLVM_DUMP_METHOD void dump() const;
+#endif
 };
 
 #if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)

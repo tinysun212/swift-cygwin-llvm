@@ -19,7 +19,7 @@ DynamicLibrary::HandleSet::~HandleSet() {
   for (void *Handle : llvm::reverse(Handles))
     ::dlclose(Handle);
   if (Process)
-    ::dlclose(Process);
+    ::dlclose(Process.getValue());
 
   // llvm_shutdown called, Return to default
   DynamicLibrary::SearchOrder = DynamicLibrary::SO_Linker;

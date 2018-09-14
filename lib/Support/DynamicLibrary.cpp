@@ -14,6 +14,7 @@
 #include "llvm/Support/DynamicLibrary.h"
 #include "llvm-c/Support.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/Optional.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/Config/config.h"
@@ -30,14 +31,14 @@ using namespace llvm::sys;
 class DynamicLibrary::HandleSet {
   typedef std::vector<void *> HandleList;
   HandleList Handles;
-  void *Process;
+  llvm::Optional<void *> Process;
 
 public:
   static void *DLOpen(const char *Filename, std::string *Err);
   static void DLClose(void *Handle);
   static void *DLSym(void *Handle, const char *Symbol);
 
-  HandleSet() : Process(nullptr) {}
+  HandleSet() {}
   ~HandleSet();
 
   HandleList::iterator Find(void *Handle) {
@@ -64,7 +65,7 @@ public:
 #ifndef LLVM_ON_WIN32
       if (Process) {
         if (CanClose)
-          DLClose(Process);
+          DLClose(Process.getValue());
         if (Process == Handle)
           return false;
       }
@@ -99,7 +100,7 @@ public:
     }
     if (Process) {
       // Use OS facilities to search the current binary and all loaded libs.
-      if (void *Ptr = DLSym(Process, Symbol))
+      if (void *Ptr = DLSym(Process.getValue(), Symbol))
         return Ptr;
 
       // Search any libs that might have been skipped because of RTLD_LOCAL.

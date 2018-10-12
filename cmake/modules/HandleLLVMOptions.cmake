@@ -312,9 +312,9 @@ elseif(MINGW) # FIXME: Also cygwin?
   # Pass -mbig-obj to mingw gas on Win64. COFF has a 2**16 section limit, and
   # on Win64, every COMDAT function creates at least 3 sections: .text, .pdata,
   # and .xdata.
-  if (CMAKE_SIZEOF_VOID_P EQUAL 8)
-    append("-Wa,-mbig-obj" CMAKE_C_FLAGS CMAKE_CXX_FLAGS)
-  endif()
+#  if (CMAKE_SIZEOF_VOID_P EQUAL 8)
+#    append("-Wa,-mbig-obj" CMAKE_C_FLAGS CMAKE_CXX_FLAGS)
+#  endif()
 endif()
 
 if( MSVC )
@@ -711,7 +711,7 @@ add_definitions( -D__STDC_LIMIT_MACROS )
 if (UNIX AND
     CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND
     CMAKE_GENERATOR STREQUAL "Ninja")
-  append("-fcolor-diagnostics" CMAKE_C_FLAGS CMAKE_CXX_FLAGS)
+  append(" " CMAKE_C_FLAGS CMAKE_CXX_FLAGS)
 endif()
 
 # lld doesn't print colored diagnostics when invoked from Ninja

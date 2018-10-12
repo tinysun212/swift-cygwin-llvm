@@ -16,6 +16,9 @@
 //===          is guaranteed to work on *all* UNIX variants.
 //===----------------------------------------------------------------------===//
 
+#if defined(__CYGWIN__)
+#define HAVE_DIRENT_H  1
+#endif
 #include "Unix.h"
 #include <limits.h>
 #include <stdio.h>

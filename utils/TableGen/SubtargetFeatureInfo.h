@@ -50,7 +50,9 @@ struct SubtargetFeatureInfo {
     return TheDef->getValueAsBit("RecomputePerFunction");
   }
 
-  void dump() const;
+#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
+  LLVM_DUMP_METHOD void dump() const;
+#endif
   static std::vector<std::pair<Record *, SubtargetFeatureInfo>>
   getAll(const RecordKeeper &Records);
 
